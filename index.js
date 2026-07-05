@@ -34,16 +34,18 @@ const COLORS = {
 };
 
 const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
-const TIME_SLOTS = ['10:00', '14:00', '15:30', '17:00'];
+const TIME_SLOTS = ['9:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
 
-// ---- 日付候補（今日・明日・明後日） ----
+// ---- 日付候補（今日から7日分） ----
 function buildDateOptions() {
   const dayLabels = ['今日', '明日', '明後日'];
-  return [0, 1, 2].map((offset) => {
+  const offsets = [0, 1, 2, 3, 4, 5, 6];
+  return offsets.map((offset) => {
     const d = new Date();
     d.setDate(d.getDate() + offset);
     d.setHours(0, 0, 0, 0);
-    const label = `${dayLabels[offset]}　${d.getMonth() + 1}/${d.getDate()}(${WEEKDAY_JA[d.getDay()]})`;
+    const prefix = dayLabels[offset] ? `${dayLabels[offset]}　` : '';
+    const label = `${prefix}${d.getMonth() + 1}/${d.getDate()}(${WEEKDAY_JA[d.getDay()]})`;
     return { label, iso: d.toISOString().slice(0, 10) }; // YYYY-MM-DD
   });
 }
