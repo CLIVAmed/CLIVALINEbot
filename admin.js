@@ -146,7 +146,8 @@ function createAdminRouter(supabase) {
           department: null,
           scheduled_at,
           symptom: symptom || null,
-          status: 'reserved',
+          // 直接来院は登録した時点ですでに患者が来院しているため、自動で「来院済み」にする
+          status: source === 'walk_in' ? 'visited' : 'reserved',
           source,
           reservation_no: finalReservationNo,
           patient_name: name,
