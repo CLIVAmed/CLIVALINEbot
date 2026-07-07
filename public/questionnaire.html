@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>問診フォーム | Cliva</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --page-bg:#F4F7F4;
+    --card-bg:#FFFFFF;
+    --border:#DCE5DF;
+    --border-strong:#A9C4B2;
+    --title:#33473C;
+    --sub:#6B7C71;
+    --accent:#3F6B52;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:'Zen Maru Gothic', sans-serif;
+    background:var(--page-bg);
+    color:var(--title);
+    min-height:100vh;
+    padding:24px 16px 60px;
+  }
+  .wrap{ max-width:480px; margin:0 auto; }
+  .card{
+    background:var(--card-bg);
+    border:1px solid var(--border);
+    border-radius:16px;
+    padding:24px;
+  }
+  h1{ font-size:19px; margin:0 0 6px; }
+  .lead{ color:var(--sub); font-size:13px; margin:0 0 20px; line-height:1.6; }
+  .field{ margin-bottom:18px; }
+  .field label{ display:block; font-size:14px; font-weight:700; margin-bottom:6px; }
+  .field .optional{ color:var(--sub); font-weight:400; font-size:12px; }
+  .field input, .field select, .field textarea{
+    width:100%;
+    border:1px solid var(--border-strong);
+    border-radius:10px;
+    padding:11px 12px;
+    font-family:inherit;
+    font-size:15px;
+    color:var(--title);
+    background:#fff;
+  }
+  .field textarea{ resize:vertical; min-height:70px; }
+  .btn-submit{
+    width:100%;
+    background:var(--accent);
+    color:#fff;
+    border:none;
+    border-radius:12px;
+    padding:14px;
+    font-family:inherit;
+    font-size:16px;
+    font-weight:700;
+    cursor:pointer;
+    margin-top:8px;
+  }
+  .btn-submit:disabled{ opacity:.6; cursor:not-allowed; }
+  .msg{
+    text-align:center;
+    padding:60px 20px;
+  }
+  .msg h2{ color:var(--accent); }
+  .msg p{ color:var(--sub); font-size:14px; line-height:1.7; }
+  .error-text{ color:#B4453B; font-size:13px; margin-top:10px; display:none; text-align:center; }
+  .hidden{ display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card" id="loadingCard">
+    <p class="lead">読み込み中…</p>
+  </div>
+
+  <div class="card hidden" id="notFoundCard">
+    <div class="msg">
+      <h2>予約情報が見つかりません</h2>
+      <p>お手数ですが、LINEでお送りしたURLをご確認いただくか、クリニックまでお問い合わせください。</p>
+    </div>
+  </div>
+
+  <div class="card hidden" id="formCard">
+    <h1>来院前の問診フォーム</h1>
+    <p class="lead" id="reservationSummary"></p>
+
+    <form id="questionnaireForm">
+      <div class="field">
+        <label>生年月日</label>
+        <input type="date" id="birth_date" />
+      </div>
+
+      <div class="field">
+        <label>性別</label>
+        <select id="gender">
+          <option value="">選択してください</option>
+          <option value="女性">女性</option>
+          <option value="男性">男性</option>
+          <option value="その他">その他</option>
+          <option value="回答しない">回答しない</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>本日相談したい内容</label>
+        <textarea id="consult_content" placeholder="例：3日前からの発熱と喉の痛みについて"></textarea>
+      </div>
+
+      <div class="field">
+        <label>症状はいつ頃からありますか？</label>
+        <input type="text" id="symptom_since" placeholder="例：3日前から" />
+      </div>
+
+      <div class="field">
+        <label>現在飲んでいるお薬はありますか？ <span class="optional">（任意）</span></label>
+        <textarea id="current_medication" placeholder="なければ空欄で構いません"></textarea>
+      </div>
+
+      <div class="field">
+        <label>食べ物や薬のアレルギーはありますか？ <span class="optional">（任意）</span></label>
+        <textarea id="allergies" placeholder="なければ空欄で構いません"></textarea>
+      </div>
+
+      <div class="field">
+        <label>これまでに大きな病気や手術をしたことがありますか？ <span class="optional">（任意）</span></label>
+        <textarea id="medical_history" placeholder="なければ空欄で構いません"></textarea>
+      </div>
+
+      <div class="error-text" id="errorText"></div>
+      <button type="submit" class="btn-submit" id="submitBtn">送信する</button>
+    </form>
+  </div>
+
+  <div class="card hidden" id="doneCard">
+    <div class="msg">
+      <h2>ご入力ありがとうございました</h2>
+      <p>問診内容を受け付けました。<br>当日はお気をつけてお越しください。</p>
+    </div>
+  </div>
+</div>
+
+<script>
+function getReservationId(){
+  const params = new URLSearchParams(window.location.search);
+  return params.get('reservation_id');
+}
+
+function show(id){
+  ['loadingCard','notFoundCard','formCard','doneCard'].forEach(cid => {
+    document.getElementById(cid).classList.toggle('hidden', cid !== id);
+  });
+}
+
+function fmtDatetime(iso){
+  const d = new Date(iso);
+  return new Intl.DateTimeFormat('ja-JP',{
+    timeZone:'Asia/Tokyo', month:'numeric', day:'numeric', weekday:'short',
+    hour:'2-digit', minute:'2-digit', hour12:false
+  }).format(d);
+}
+
+async function init(){
+  const reservationId = getReservationId();
+  if(!reservationId){ show('notFoundCard'); return; }
+
+  try{
+    const res = await fetch(`/api/questionnaire/${reservationId}`);
+    if(!res.ok){ show('notFoundCard'); return; }
+    const data = await res.json();
+
+    document.getElementById('reservationSummary').textContent =
+      `${data.reservation.name ? data.reservation.name + '様 ' : ''}ご予約日時：${fmtDatetime(data.reservation.scheduled_at)}`;
+
+    if(data.questionnaire){
+      const q = data.questionnaire;
+      document.getElementById('birth_date').value = q.birth_date || '';
+      document.getElementById('gender').value = q.gender || '';
+      document.getElementById('consult_content').value = q.consult_content || '';
+      document.getElementById('symptom_since').value = q.symptom_since || '';
+      document.getElementById('current_medication').value = q.current_medication || '';
+      document.getElementById('allergies').value = q.allergies || '';
+      document.getElementById('medical_history').value = q.medical_history || '';
+    }
+
+    show('formCard');
+  }catch(e){
+    show('notFoundCard');
+  }
+}
+
+document.getElementById('questionnaireForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const reservationId = getReservationId();
+  const submitBtn = document.getElementById('submitBtn');
+  const errorText = document.getElementById('errorText');
+  errorText.style.display = 'none';
+
+  const payload = {
+    birth_date: document.getElementById('birth_date').value || null,
+    gender: document.getElementById('gender').value || null,
+    consult_content: document.getElementById('consult_content').value.trim(),
+    symptom_since: document.getElementById('symptom_since').value.trim(),
+    current_medication: document.getElementById('current_medication').value.trim() || null,
+    allergies: document.getElementById('allergies').value.trim() || null,
+    medical_history: document.getElementById('medical_history').value.trim() || null,
+  };
+
+  if(!payload.consult_content || !payload.symptom_since){
+    errorText.textContent = '「本日相談したい内容」と「症状の時期」は必須です';
+    errorText.style.display = 'block';
+    return;
+  }
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = '送信中…';
+
+  try{
+    const res = await fetch(`/api/questionnaire/${reservationId}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    if(!res.ok){
+      const data = await res.json().catch(()=>({}));
+      errorText.textContent = data.error || '送信に失敗しました。時間をおいて再度お試しください。';
+      errorText.style.display = 'block';
+      submitBtn.disabled = false;
+      submitBtn.textContent = '送信する';
+      return;
+    }
+    show('doneCard');
+  }catch(e){
+    errorText.textContent = '送信に失敗しました。時間をおいて再度お試しください。';
+    errorText.style.display = 'block';
+    submitBtn.disabled = false;
+    submitBtn.textContent = '送信する';
+  }
+});
+
+init();
+</script>
+</body>
+</html>
