@@ -6,10 +6,12 @@
 // 受診科はスタッフが後から電話・問診等で確認して入力する運用を前提としています。
 
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const line = require('@line/bot-sdk');
 const { createClient } = require('@supabase/supabase-js');
 const { createCalendarEvent, updateCalendarEvent, markCalendarEventCancelled } = require('./googleCalendar');
+const { createAdminRouter } = require('./admin');
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -367,7 +369,8 @@ async function finalizeReservation(lineUserId, session) {
       department: null, // 受診科は未確定。スタッフが後から確認・入力する
       scheduled_at: session.temp_datetime,
       symptom: session.temp_symptom,
-      status: 'before',
+      status: 'reserved',
+      source: 'line', // LINE予約経由は自動でsource=lineとして保存する
       reservation_no: finalReservationNo,
     })
     .select()
@@ -424,7 +427,7 @@ async function findUpcomingReservation(lineUserId) {
     .from('reservations')
     .select('*')
     .eq('patient_id', patient.id)
-    .eq('status', 'before')
+    .eq('status', 'reserved')
     .gte('scheduled_at', nowIso)
     .order('scheduled_at', { ascending: true })
     .limit(1)
@@ -474,7 +477,7 @@ async function finalizeReschedule(event, lineUserId, session, newDatetimeIso) {
     .eq('id', targetId)
     .maybeSingle();
 
-  if (!reservation || reservation.status !== 'before') {
+  if (!reservation || reservation.status !== 'reserved') {
     await resetSession(lineUserId);
     return client.replyMessage(event.replyToken, {
       type: 'text',
@@ -566,17 +569,33 @@ async function handleTextMessage(event) {
       const updatedSession = { ...session, temp_symptom: text };
       await updateSession(lineUserId, { temp_symptom: text, state: 'DONE' });
       const reservation = await finalizeReservation(lineUserId, updatedSession);
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text:
-          `ご予約を受け付けました。\n` +
-          `${formatDatetime(reservation.scheduled_at)}\n` +
-          `予約番号　${reservation.reservation_no}\n\n` +
-          `受診科につきましては、追ってスタッフよりご連絡いたします。\n` +
-          `当日はお気をつけてお越しください。\n\n` +
-          `※ご予約の変更またはキャンセルをされる場合は、\n` +
-          `「変更」または「キャンセル」と送信してください。`,
-      });
+      const messages = [
+        {
+          type: 'text',
+          text:
+            `ご予約を受け付けました。\n` +
+            `${formatDatetime(reservation.scheduled_at)}\n` +
+            `予約番号　${reservation.reservation_no}\n\n` +
+            `受診科につきましては、追ってスタッフよりご連絡いたします。\n` +
+            `当日はお気をつけてお越しください。\n\n` +
+            `※ご予約の変更またはキャンセルをされる場合は、\n` +
+            `「変更」または「キャンセル」と送信してください。`,
+        },
+      ];
+
+      // 問診フォームのURLを案内する（BASE_URLが設定されている場合のみ）
+      const questionnaireUrl = buildQuestionnaireUrl(reservation.id);
+      if (questionnaireUrl) {
+        messages.push({
+          type: 'text',
+          text:
+            `来院前に、以下の問診フォームのご入力をお願いいたします。\n\n` +
+            `${questionnaireUrl}\n\n` +
+            `入力は1〜2分ほどで完了します。`,
+        });
+      }
+
+      return client.replyMessage(event.replyToken, messages);
     }
 
     default: {
@@ -666,7 +685,7 @@ async function handlePostback(event) {
       .eq('id', rid)
       .maybeSingle();
 
-    if (!reservation || reservation.status !== 'before') {
+    if (!reservation || reservation.status !== 'reserved') {
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: 'このご予約はすでに変更・キャンセル済み、または見つかりませんでした。',
@@ -735,7 +754,7 @@ async function handlePostback(event) {
       .eq('id', rid)
       .maybeSingle();
 
-    if (!reservation || reservation.status !== 'before') {
+    if (!reservation || reservation.status !== 'reserved') {
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: 'このご予約はすでに処理済み、または見つかりませんでした。',
@@ -783,6 +802,15 @@ async function handleEvent(event) {
   return Promise.resolve(null);
 }
 
+// 予約ごとの問診フォームURLを組み立てる。
+// BASE_URL が未設定の場合は null を返し、呼び出し側は案内メッセージを送らない
+// （＝環境変数が無くても既存の予約フローは壊れない）。
+function buildQuestionnaireUrl(reservationId) {
+  const base = process.env.BASE_URL;
+  if (!base) return null;
+  return `${base.replace(/\/$/, '')}/questionnaire?reservation_id=${reservationId}`;
+}
+
 // サーバーのタイムゾーン(Render等ではUTC)に関係なく、常にJSTで表示するための整形関数
 function formatDatetime(iso) {
   const d = new Date(iso);
@@ -809,6 +837,9 @@ function formatDatetime(iso) {
 }
 
 // ---- ルーティング ----
+// 注意: express.json() は admin.js 側の router 内だけに限定して適用している。
+// ここでグローバルに app.use(express.json()) すると、/webhook が必要とする
+// 生ボディ（署名検証用）が壊れてしまうため、絶対にここには追加しないこと。
 app.post('/webhook', line.middleware(config), (req, res) => {
   Promise.all(req.body.events.map(handleEvent))
     .then(() => res.status(200).end())
@@ -817,6 +848,18 @@ app.post('/webhook', line.middleware(config), (req, res) => {
       res.status(500).end();
     });
 });
+
+// ---- 管理画面・問診フォームのJSON API ----
+app.use('/api', createAdminRouter(supabase));
+
+// ---- 管理画面・問診フォームの静的ページ ----
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+app.get('/questionnaire', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'questionnaire.html'));
+});
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => {
   res.send('CLIVA LINE webhook is running.');
