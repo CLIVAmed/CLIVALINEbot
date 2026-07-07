@@ -372,6 +372,11 @@ async function finalizeReservation(lineUserId, session) {
       status: 'reserved',
       source: 'line', // LINE予約経由は自動でsource=lineとして保存する
       reservation_no: finalReservationNo,
+      // この予約をした時点の氏名・電話番号をスナップショットとして保存する。
+      // patients.name/phone は同じLINEアカウントの次回予約で上書きされるため、
+      // 過去の予約の表示名がそれに引っ張られて変わってしまわないようにするため。
+      patient_name: session.temp_name,
+      patient_phone: session.temp_phone,
     })
     .select()
     .single();
@@ -413,14 +418,16 @@ async function finalizeReservation(lineUserId, session) {
 
 // ---- 予約変更・キャンセル機能 ----
 
-// LINEユーザーの直近の有効な予約（来院前・現在時刻より後）を1件取得する
-async function findUpcomingReservation(lineUserId) {
+// LINEユーザーの直近の有効な予約（来院前・現在時刻より後）を「すべて」取得する。
+// 複数件の予約を持つ患者でも、どの予約を変更・キャンセルしたいか選べるようにするため、
+// 以前のように .limit(1) で1件だけに絞らない。
+async function findUpcomingReservations(lineUserId) {
   const { data: patient } = await supabase
     .from('patients')
     .select('id')
     .eq('line_user_id', lineUserId)
     .maybeSingle();
-  if (!patient) return null;
+  if (!patient) return [];
 
   const nowIso = new Date().toISOString();
   const { data } = await supabase
@@ -429,28 +436,16 @@ async function findUpcomingReservation(lineUserId) {
     .eq('patient_id', patient.id)
     .eq('status', 'reserved')
     .gte('scheduled_at', nowIso)
-    .order('scheduled_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  return data;
+    .order('scheduled_at', { ascending: true });
+  return data || [];
 }
 
-// 「変更」「キャンセル」キーワードへの入口。直近の予約を探し、選択メニューを送る
-async function handleChangeCancelMenu(event, lineUserId) {
-  const reservation = await findUpcomingReservation(lineUserId);
-  if (!reservation) {
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text:
-        '現在お受けしている有効なご予約が見つかりませんでした。\n' +
-        '新しく予約されたい場合は「予約」とお送りください。',
-    });
-  }
-
-  const flex = buildCardSelectFlex({
+// 指定した1件の予約について「日時を変更する／キャンセルする」の選択メニューを組み立てる
+function buildChangeCancelOptionsFlex(reservation) {
+  return buildCardSelectFlex({
     altText: 'ご予約の変更・キャンセル',
     heading: 'ご予約の変更・キャンセル',
-    subheading: `現在のご予約：${formatDatetime(reservation.scheduled_at)}`,
+    subheading: `対象のご予約：${formatDatetime(reservation.scheduled_at)}`,
     options: [
       {
         label: '日時を変更する',
@@ -463,6 +458,37 @@ async function handleChangeCancelMenu(event, lineUserId) {
         displayText: 'キャンセルする',
       },
     ],
+  });
+}
+
+// 「変更」「キャンセル」キーワードへの入口。
+// 有効な予約が2件以上ある場合は、まずどの予約を対象にするか選んでもらう。
+async function handleChangeCancelMenu(event, lineUserId) {
+  const reservations = await findUpcomingReservations(lineUserId);
+
+  if (reservations.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text:
+        '現在お受けしている有効なご予約が見つかりませんでした。\n' +
+        '新しく予約されたい場合は「予約」とお送りください。',
+    });
+  }
+
+  if (reservations.length === 1) {
+    return client.replyMessage(event.replyToken, buildChangeCancelOptionsFlex(reservations[0]));
+  }
+
+  // 予約が複数ある場合は、まず対象を選んでもらう
+  const flex = buildCardSelectFlex({
+    altText: 'どちらのご予約を変更・キャンセルしますか',
+    heading: 'どちらのご予約について変更・キャンセルしますか？',
+    subheading: '対象のご予約を選んでください',
+    options: reservations.map((r) => ({
+      label: `${formatDatetime(r.scheduled_at)}\n（予約番号 ${r.reservation_no}）`,
+      data: `action=selectReservation&rid=${r.id}`,
+      displayText: `${formatDatetime(r.scheduled_at)}の予約`,
+    })),
   });
   return client.replyMessage(event.replyToken, flex);
 }
@@ -673,6 +699,25 @@ async function handlePostback(event) {
     });
   }
 
+  // 予約が複数ある場合に、対象の予約を選んでもらった後の遷移
+  if (action === 'selectReservation') {
+    const rid = params.get('rid');
+    const { data: reservation } = await supabase
+      .from('reservations')
+      .select('*')
+      .eq('id', rid)
+      .maybeSingle();
+
+    if (!reservation || reservation.status !== 'reserved') {
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: 'このご予約はすでに変更・キャンセル済み、または見つかりませんでした。',
+      });
+    }
+
+    return client.replyMessage(event.replyToken, buildChangeCancelOptionsFlex(reservation));
+  }
+
   // 「変更」「キャンセル」メニューでの選択（cxlMenu = cancel/change menu）
   if (action === 'cxlMenu') {
     const value = params.get('value');
@@ -761,7 +806,19 @@ async function handlePostback(event) {
       });
     }
 
-    await supabase.from('reservations').update({ status: 'cancelled' }).eq('id', rid);
+    const { error: cancelUpdateError } = await supabase
+      .from('reservations')
+      .update({ status: 'cancelled' })
+      .eq('id', rid);
+
+    if (cancelUpdateError) {
+      // 更新に失敗した場合は、患者に「キャンセル完了」と誤って伝えないようにする
+      console.error(`[cancel] 予約 ${rid} のキャンセル処理に失敗しました:`, cancelUpdateError.message);
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: '申し訳ございません、キャンセル処理に失敗しました。お手数ですがクリニックまでご連絡ください。',
+      });
+    }
 
     // Googleカレンダー側は削除せず「キャンセル済み」として強調表示する（失敗しても予約キャンセル自体は完了させる）
     if (reservation.calendar_event_id) {
