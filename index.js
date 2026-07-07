@@ -35,7 +35,36 @@ const COLORS = {
 };
 
 const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
-const TIME_SLOTS = ['9:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
+
+// ---- 営業時間・予約枠の設定 ----
+// 営業時間: 10:00〜13:00 / 15:00〜18:00、30分刻みの枠
+// 各枠の予約上限（同じ枠に何件まで予約を受け付けるか）
+const BUSINESS_HOURS = [
+  { start: '10:00', end: '13:00' },
+  { start: '15:00', end: '18:00' },
+];
+const SLOT_INTERVAL_MIN = 30;
+const MAX_RESERVATIONS_PER_SLOT = 3;
+
+// 営業時間・枠間隔から "9:00" 形式の時間ラベル一覧を自動生成する
+function generateTimeSlots() {
+  const slots = [];
+  for (const range of BUSINESS_HOURS) {
+    const [startH, startM] = range.start.split(':').map(Number);
+    const [endH, endM] = range.end.split(':').map(Number);
+    let cur = startH * 60 + startM;
+    const endTotalMin = endH * 60 + endM;
+    // 「枠の開始時刻＋枠の長さ」が営業終了時刻を超えない範囲だけ枠を作る
+    while (cur + SLOT_INTERVAL_MIN <= endTotalMin) {
+      const h = Math.floor(cur / 60);
+      const m = cur % 60;
+      slots.push(`${h}:${String(m).padStart(2, '0')}`);
+      cur += SLOT_INTERVAL_MIN;
+    }
+  }
+  return slots;
+}
+const TIME_SLOTS = generateTimeSlots();
 
 // ---- タイムゾーン関連ヘルパー ----
 // 本番(Render等)のサーバーはUTCで動作するため、サーバーのローカル時刻(new Date()の
@@ -75,44 +104,105 @@ function buildDateOptions() {
   });
 }
 
-// ---- 指定日付に対する時間候補（JST基準） ----
-function buildTimeOptionsForDate(dateIso) {
+// JSTの日付(YYYY-MM-DD)から、その日の開始〜翌日開始までのUTC ISO範囲を作る
+// （Supabaseへの「その日の予約を全部取得する」クエリで使う）
+function jstDayRangeIso(dateIso) {
   const [y, m, d] = dateIso.split('-').map(Number);
+  const startIso = jstToIsoString(y, m, d, 0, 0);
+  // 翌日の年月日を Date.UTC の自動繰り上げで求める（月末・年末をまたいでも安全）
+  const nextDay = new Date(Date.UTC(y, m - 1, d + 1));
+  const endIso = jstToIsoString(nextDay.getUTCFullYear(), nextDay.getUTCMonth() + 1, nextDay.getUTCDate(), 0, 0);
+  return { startIso, endIso };
+}
+
+// 指定日の「枠ごとの予約件数」を取得する（キャンセル済みは除外）
+// 取得に失敗した場合は空オブジェクトを返す＝満枠判定をせず通常表示にする（安全側に倒す）
+async function getBookedCountsForDate(dateIso) {
+  const { startIso, endIso } = jstDayRangeIso(dateIso);
+  const { data, error } = await supabase
+    .from('reservations')
+    .select('scheduled_at')
+    .gte('scheduled_at', startIso)
+    .lt('scheduled_at', endIso)
+    .neq('status', 'cancelled');
+
+  if (error) {
+    console.error(`[slots] 予約件数の取得に失敗しました: ${error.message}`);
+    return {};
+  }
+
+  const counts = {};
+  (data || []).forEach((row) => {
+    const iso = new Date(row.scheduled_at).toISOString();
+    counts[iso] = (counts[iso] || 0) + 1;
+  });
+  return counts;
+}
+
+// 指定した日時（ISO文字列）が、すでに上限件数に達しているかを調べる
+async function isSlotFull(datetimeIso) {
+  const d = new Date(datetimeIso);
+  const jstMs = d.getTime() + JST_OFFSET_MINUTES * 60 * 1000;
+  const jstDate = new Date(jstMs);
+  const dateIso = `${jstDate.getUTCFullYear()}-${String(jstDate.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    jstDate.getUTCDate()
+  ).padStart(2, '0')}`;
+  const counts = await getBookedCountsForDate(dateIso);
+  const normalizedIso = new Date(datetimeIso).toISOString();
+  return (counts[normalizedIso] || 0) >= MAX_RESERVATIONS_PER_SLOT;
+}
+
+// ---- 指定日付に対する時間候補（JST基準・満枠判定つき） ----
+async function buildTimeOptionsForDate(dateIso) {
+  const [y, m, d] = dateIso.split('-').map(Number);
+  const counts = await getBookedCountsForDate(dateIso);
   return TIME_SLOTS.map((t) => {
     const [h, min] = t.split(':').map(Number);
-    return { label: t, iso: jstToIsoString(y, m, d, h, min) };
+    const iso = jstToIsoString(y, m, d, h, min);
+    const bookedCount = counts[iso] || 0;
+    const full = bookedCount >= MAX_RESERVATIONS_PER_SLOT;
+    return { label: t, iso, full };
   });
 }
 
 // ---- Flex Message: カード型の選択肢を1枚のバブルにまとめる ----
-// options: [{ label, data, displayText }]
+// options: [{ label, data, displayText, disabled }]
+// disabled: true の場合はタップ不可のグレーアウト表示にする（満枠表示などに使用）
 function buildCardSelectFlex({ altText, heading, subheading, options, footerOptions = [] }) {
-  const optionBox = (opt, accentBorder = false) => ({
-    type: 'box',
-    layout: 'vertical',
-    cornerRadius: '12px',
-    borderWidth: accentBorder ? '2px' : '1px',
-    borderColor: COLORS.cardBorder,
-    backgroundColor: COLORS.cardBg,
-    paddingAll: '18px',
-    margin: 'md',
-    action: {
-      type: 'postback',
-      data: opt.data,
-      displayText: opt.displayText || opt.label,
-    },
-    contents: [
-      {
-        type: 'text',
-        text: opt.label,
-        size: 'xl',
-        weight: 'bold',
-        align: 'center',
-        wrap: true,
-        color: COLORS.titleText,
-      },
-    ],
-  });
+  const optionBox = (opt, accentBorder = false) => {
+    const disabled = !!opt.disabled;
+    return {
+      type: 'box',
+      layout: 'vertical',
+      cornerRadius: '12px',
+      borderWidth: accentBorder ? '2px' : '1px',
+      borderColor: disabled ? '#D9DDD9' : COLORS.cardBorder,
+      backgroundColor: disabled ? '#EDEEEC' : COLORS.cardBg,
+      paddingAll: '18px',
+      margin: 'md',
+      // 満枠の場合はaction自体を付けない＝タップしても何も起きない
+      ...(disabled
+        ? {}
+        : {
+            action: {
+              type: 'postback',
+              data: opt.data,
+              displayText: opt.displayText || opt.label,
+            },
+          }),
+      contents: [
+        {
+          type: 'text',
+          text: opt.label,
+          size: 'xl',
+          weight: 'bold',
+          align: 'center',
+          wrap: true,
+          color: disabled ? '#A6ACA6' : COLORS.titleText,
+        },
+      ],
+    };
+  };
 
   const contents = [
     {
@@ -178,17 +268,18 @@ function sendDateCards(replyToken) {
   return client.replyMessage(replyToken, flex);
 }
 
-// ---- 時間選択カードを送信（「日付選びなおし」の戻るカード付き） ----
-function sendTimeCards(replyToken, dateIso, dateLabel) {
-  const timeOptions = buildTimeOptionsForDate(dateIso);
+// ---- 時間選択カードを送信（「日付選びなおし」の戻るカード付き、満枠は表示のみでタップ不可） ----
+async function sendTimeCards(replyToken, dateIso, dateLabel) {
+  const timeOptions = await buildTimeOptionsForDate(dateIso);
   const flex = buildCardSelectFlex({
     altText: 'ご希望の時間を選んでください',
     heading: 'ご希望の時間を選んでください',
     subheading: `${dateLabel} のご希望時間`,
     options: timeOptions.map((t) => ({
-      label: t.label,
+      label: t.full ? `${t.label}（満枠）` : t.label,
       data: `action=selectTime&value=${t.iso}`,
-      displayText: t.label,
+      displayText: t.full ? `${t.label}（満枠）` : t.label,
+      disabled: t.full,
     })),
     footerOptions: [
       {
@@ -382,6 +473,44 @@ async function handlePostback(event) {
 
   if (action === 'selectTime') {
     const datetimeIso = params.get('value');
+
+    // タップした瞬間と実際の処理の間にわずかな時間差があるため、
+    // 他の患者がほぼ同時に予約して枠が埋まった場合に備えて再チェックする
+    const full = await isSlotFull(datetimeIso);
+    if (full) {
+      const dateIso = session.temp_date;
+      const dateOptions = buildDateOptions();
+      const matched = dateOptions.find((d) => d.iso === dateIso);
+      const dateLabel = matched ? matched.label : dateIso;
+      const timeOptions = await buildTimeOptionsForDate(dateIso);
+      const flex = buildCardSelectFlex({
+        altText: 'ご希望の時間を選んでください',
+        heading: 'ご希望の時間を選んでください',
+        subheading: `${dateLabel} のご希望時間`,
+        options: timeOptions.map((t) => ({
+          label: t.full ? `${t.label}（満枠）` : t.label,
+          data: `action=selectTime&value=${t.iso}`,
+          displayText: t.full ? `${t.label}（満枠）` : t.label,
+          disabled: t.full,
+        })),
+        footerOptions: [
+          {
+            label: '← 日付を選びなおす',
+            data: 'action=backToDate',
+            displayText: '日付を選びなおす',
+          },
+        ],
+      });
+      // replyTokenは1回しか使えないため、案内メッセージとカードを1回のreplyで両方送る
+      return client.replyMessage(event.replyToken, [
+        {
+          type: 'text',
+          text: '申し訳ございません、ちょうどこの時間は満枠になってしまいました。他の時間をお選びください。',
+        },
+        flex,
+      ]);
+    }
+
     await updateSession(lineUserId, { temp_datetime: datetimeIso, state: 'INFO_NAME' });
     return client.replyMessage(event.replyToken, {
       type: 'text',
