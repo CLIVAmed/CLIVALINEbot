@@ -9,6 +9,7 @@ require('dotenv').config();
 const express = require('express');
 const line = require('@line/bot-sdk');
 const { createClient } = require('@supabase/supabase-js');
+const { createCalendarEvent } = require('./googleCalendar');
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -255,6 +256,30 @@ async function finalizeReservation(lineUserId, session) {
     })
     .select()
     .single();
+
+  // Google カレンダーへ予定を自動作成する。
+  // ここでの失敗は予約完了を妨げない（失敗しても予約は確定させ、ログだけ残す）。
+  // 認証情報が未設定の場合は googleCalendar 側でスキップされる。
+  try {
+    const calendarResult = await createCalendarEvent({
+      name: session.temp_name,
+      phone: session.temp_phone,
+      symptom: session.temp_symptom,
+      scheduledAt: reservation.scheduled_at,
+      lineUserId,
+    });
+    if (!calendarResult.ok && !calendarResult.skipped) {
+      console.error(
+        `[calendar] 予約 ${reservation.reservation_no} のカレンダー登録に失敗しました: ${calendarResult.error}`
+      );
+    }
+  } catch (calendarErr) {
+    // createCalendarEvent 内で握りつぶしているが、念のため二重に保護する
+    console.error(
+      `[calendar] 予約 ${reservation.reservation_no} のカレンダー登録で予期しないエラー:`,
+      calendarErr
+    );
+  }
 
   await resetSession(lineUserId);
   return reservation;
