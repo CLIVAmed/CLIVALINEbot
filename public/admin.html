@@ -162,6 +162,7 @@
   .badge-reserved{ background:var(--accent-soft); color:var(--accent); }
   .badge-cancelled{ background:var(--danger-soft); color:var(--danger); }
   .badge-overdue{ background:var(--warn-soft); color:var(--warn); }
+  .badge-visited{ background:#E7ECF3; color:#3D5A80; }
   .badge-outline{ background:#fff; border:1px solid var(--border-strong); color:var(--sub); }
   .card-sub{ color:var(--sub); font-size:13px; margin-top:2px; }
   .card-name{ font-size:15px; font-weight:700; margin-top:4px; }
@@ -234,7 +235,7 @@
 <main>
   <div class="tabs">
     <button class="tab-btn active" data-tab="list">予約一覧</button>
-    <button class="tab-btn" data-tab="no_show">未来院一覧</button>
+    <button class="tab-btn" data-tab="cancelled">キャンセル済み</button>
   </div>
 
   <div class="toolbar">
@@ -327,9 +328,12 @@ function dayLabel(key){
   return new Intl.DateTimeFormat('ja-JP', { timeZone:'Asia/Tokyo', month:'numeric', day:'numeric', weekday:'short' }).format(d);
 }
 
-async function loadList(){
+async function loadList(opts = {}){
+  const silent = !!opts.silent;
   const container = document.getElementById('listContainer');
-  container.innerHTML = '<div class="empty">読み込み中…</div>';
+  if(!silent){
+    container.innerHTML = '<div class="empty">読み込み中…</div>';
+  }
   try{
     const res = await fetch(`/api/reservations?view=${currentTab}`);
     const data = await res.json();
@@ -337,7 +341,10 @@ async function loadList(){
     renderDayTabs();
     renderList();
   }catch(e){
-    container.innerHTML = '<div class="empty">読み込みに失敗しました。時間をおいて再度お試しください。</div>';
+    if(!silent){
+      container.innerHTML = '<div class="empty">読み込みに失敗しました。時間をおいて再度お試しください。</div>';
+    }
+    console.error('[admin] 一覧の自動更新に失敗しました:', e);
   }
 }
 
@@ -394,7 +401,7 @@ function renderList(){
   document.getElementById('countLabel').textContent = `${visibleList.length}件`;
 
   if(visibleList.length === 0){
-    container.innerHTML = `<div class="empty">${currentTab==='no_show' ? '未来院の患者はいません' : 'この日の予約はありません'}</div>`;
+    container.innerHTML = `<div class="empty">${currentTab==='cancelled' ? 'キャンセル済みの予約はありません' : 'この日の予約はありません'}</div>`;
     return;
   }
 
@@ -403,23 +410,33 @@ function renderList(){
     const card = document.createElement('div');
     card.className = 'card';
 
-    const statusBadge = r.status === 'cancelled'
-      ? `<span class="badge badge-cancelled">${STATUS_LABEL[r.status]}</span>`
-      : `<span class="badge badge-reserved">${STATUS_LABEL[r.status]}</span>`;
+    // display_state: reserved(予約済み) / overdue(未来院) / visited(来院済み) / cancelled(キャンセル済み)
+    const state = r.display_state || r.status;
+    const stateInfo = {
+      reserved:  { label:'予約済み',   cls:'badge-reserved'  },
+      overdue:   { label:'未来院',     cls:'badge-overdue'   },
+      visited:   { label:'来院済み',   cls:'badge-visited'   },
+      cancelled: { label:'キャンセル済み', cls:'badge-cancelled' },
+    }[state] || { label: state, cls:'badge-outline' };
 
-    const overdueBadge = currentTab === 'no_show'
+    const statusBadge = `<span class="badge ${stateInfo.cls}">${stateInfo.label}</span>`;
+    const overdueTimeBadge = (state === 'overdue' && r.overdue_label)
       ? `<span class="badge badge-overdue">${r.overdue_label}</span>` : '';
 
     const qBadge = r.questionnaire_submitted
       ? `<span class="badge badge-outline">問診 入力済み</span>`
       : `<span class="badge badge-outline">問診 未入力</span>`;
 
+    // ステータス変更操作は、予約経路(LINE/電話/直接来院/受付入力)に関わらず、
+    // status === 'reserved'（未来院を含む）の間はどの予約にも表示する
+    const canChangeStatus = r.status === 'reserved';
+
     card.innerHTML = `
       <div class="card-main" onclick="openDetail(${r.id})">
         <div class="card-row1">
           <span class="card-datetime">${fmtDatetime(r.scheduled_at)}</span>
           ${statusBadge}
-          ${overdueBadge}
+          ${overdueTimeBadge}
           <span class="badge badge-outline">${SOURCE_LABEL[r.source] || r.source || '-'}</span>
           ${qBadge}
         </div>
@@ -428,8 +445,8 @@ function renderList(){
       </div>
       <div class="card-actions">
         <button class="btn btn-outline" onclick="openDetail(${r.id})">詳細を見る</button>
-        ${r.status === 'reserved' ? `<button class="btn btn-primary" onclick="updateStatus(${r.id},'visited')">来院済みにする</button>` : ''}
-        ${r.status === 'reserved' ? `<button class="btn btn-danger" onclick="updateStatus(${r.id},'cancelled')">キャンセル済みにする</button>` : ''}
+        ${canChangeStatus ? `<button class="btn btn-primary" onclick="updateStatus(${r.id},'visited')">来院済みにする</button>` : ''}
+        ${canChangeStatus ? `<button class="btn btn-danger" onclick="updateStatus(${r.id},'cancelled')">キャンセル済みにする</button>` : ''}
       </div>
     `;
     container.appendChild(card);
@@ -476,7 +493,7 @@ setInterval(() => {
   const detailOpen = document.getElementById('detailOverlay').classList.contains('open');
   const newOpen = document.getElementById('newOverlay').classList.contains('open');
   if (!detailOpen && !newOpen) {
-    loadList();
+    loadList({ silent: true });
   }
 }, 15000);
 
@@ -495,11 +512,13 @@ async function openDetail(id){
     const r = data.reservation;
 
     const q = r.questionnaire;
+    const isOverdue = r.status === 'reserved' && new Date(r.scheduled_at).getTime() < Date.now();
+    const stateLabel = isOverdue ? '未来院' : (STATUS_LABEL[r.status] || r.status);
     const rows = [
       ['氏名', escapeHtml(r.name) || '-'],
       ['電話番号', escapeHtml(r.phone) || '-'],
       ['予約日時', fmtDatetime(r.scheduled_at)],
-      ['状態', STATUS_LABEL[r.status] || r.status],
+      ['状態', stateLabel],
       ['予約経路', SOURCE_LABEL[r.source] || r.source || '-'],
       ['問診入力状況', r.questionnaire_submitted ? '入力済み' : '未入力'],
     ];
