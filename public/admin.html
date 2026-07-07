@@ -199,7 +199,10 @@
 
   <div class="toolbar">
     <span class="count-label" id="countLabel"></span>
-    <button class="btn btn-primary" id="openNewBtn">＋ 新規予約追加</button>
+    <div style="display:flex; gap:8px;">
+      <button class="btn btn-outline" id="refreshBtn">↻ 更新</button>
+      <button class="btn btn-primary" id="openNewBtn">＋ 新規予約追加</button>
+    </div>
   </div>
 
   <div class="list" id="listContainer"></div>
@@ -359,6 +362,18 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     loadList();
   });
 });
+
+document.getElementById('refreshBtn').addEventListener('click', loadList);
+
+// LINE側での予約・キャンセル・変更は管理画面を開いたまま反映されないため、
+// 開いている間は定期的に一覧を自動更新する（モーダルを開いている間は上書きしないよう避ける）
+setInterval(() => {
+  const detailOpen = document.getElementById('detailOverlay').classList.contains('open');
+  const newOpen = document.getElementById('newOverlay').classList.contains('open');
+  if (!detailOpen && !newOpen) {
+    loadList();
+  }
+}, 15000);
 
 // ---- 詳細モーダル ----
 async function openDetail(id){
