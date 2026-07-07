@@ -135,14 +135,6 @@ async function createCalendarEvent({ name, phone, symptom, scheduledAt, lineUser
   const startIso = toJstNaiveString(startMs);
   const endIso = toJstNaiveString(startMs + EVENT_DURATION_MIN * 60 * 1000);
 
-  // ---- デバッグ用ログ（時刻ズレの原因切り分けのため一時的に追加） ----
-  // 受け取った scheduledAt（Supabaseに保存されている値）と、
-  // Google Calendar APIへ実際に送る dateTime を突き合わせて確認できるようにする。
-  console.log(
-    `[calendar][debug] 受け取ったscheduledAt(UTC生値)=${scheduledAt} ` +
-      `/ Googleへ送るdateTime(JST壁時計・オフセットなし)=${startIso} `
-  );
-
   const requestBody = {
     summary: `CLIVA予約：${name || '患者名未入力'}`,
     description: buildDescription({ name, phone, symptom, scheduledAt, lineUserId }),
