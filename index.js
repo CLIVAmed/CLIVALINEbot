@@ -37,27 +37,50 @@ const COLORS = {
 const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
 const TIME_SLOTS = ['9:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
 
-// ---- 日付候補（今日から7日分） ----
+// ---- タイムゾーン関連ヘルパー ----
+// 本番(Render等)のサーバーはUTCで動作するため、サーバーのローカル時刻(new Date()の
+// getHours/getDate等)をそのままJSTとして扱うと9時間ズレる。
+// 以下のヘルパーは、サーバーのタイムゾーンに関係なく常にAsia/Tokyo基準で計算する。
+const JST_OFFSET_MINUTES = 9 * 60;
+
+// 「現在時刻をJSTの壁時計として見た年月日」を取得するためのDateオブジェクトを作る。
+// （このDateの getUTC* 系メソッドで読むと、JSTの年月日時分がそのまま得られる）
+function nowAsJstWallClock() {
+  const now = new Date();
+  return new Date(now.getTime() + JST_OFFSET_MINUTES * 60 * 1000);
+}
+
+// JSTの年月日時分を指定して、正しいUTC ISO文字列（Googleカレンダー等に渡す実時刻）を作る
+function jstToIsoString(year, month, day, hour = 0, minute = 0) {
+  const utcMs = Date.UTC(year, month - 1, day, hour, minute) - JST_OFFSET_MINUTES * 60 * 1000;
+  return new Date(utcMs).toISOString();
+}
+
+// ---- 日付候補（今日から7日分、JST基準） ----
 function buildDateOptions() {
   const dayLabels = ['今日', '明日', '明後日'];
   const offsets = [0, 1, 2, 3, 4, 5, 6];
+  const jstNow = nowAsJstWallClock();
   return offsets.map((offset) => {
-    const d = new Date();
-    d.setDate(d.getDate() + offset);
-    d.setHours(0, 0, 0, 0);
+    const d = new Date(jstNow.getTime());
+    d.setUTCDate(d.getUTCDate() + offset);
+    const y = d.getUTCFullYear();
+    const m = d.getUTCMonth() + 1;
+    const day = d.getUTCDate();
+    const weekday = d.getUTCDay();
     const prefix = dayLabels[offset] ? `${dayLabels[offset]}　` : '';
-    const label = `${prefix}${d.getMonth() + 1}/${d.getDate()}(${WEEKDAY_JA[d.getDay()]})`;
-    return { label, iso: d.toISOString().slice(0, 10) }; // YYYY-MM-DD
+    const label = `${prefix}${m}/${day}(${WEEKDAY_JA[weekday]})`;
+    const iso = `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    return { label, iso }; // iso は YYYY-MM-DD（JSTでの日付）
   });
 }
 
-// ---- 指定日付に対する時間候補 ----
+// ---- 指定日付に対する時間候補（JST基準） ----
 function buildTimeOptionsForDate(dateIso) {
+  const [y, m, d] = dateIso.split('-').map(Number);
   return TIME_SLOTS.map((t) => {
-    const [h, m] = t.split(':').map(Number);
-    const dt = new Date(`${dateIso}T00:00:00`);
-    dt.setHours(h, m, 0, 0);
-    return { label: t, iso: dt.toISOString() };
+    const [h, min] = t.split(':').map(Number);
+    return { label: t, iso: jstToIsoString(y, m, d, h, min) };
   });
 }
 
@@ -387,11 +410,29 @@ async function handleEvent(event) {
   return Promise.resolve(null);
 }
 
+// サーバーのタイムゾーン(Render等ではUTC)に関係なく、常にJSTで表示するための整形関数
 function formatDatetime(iso) {
   const d = new Date(iso);
-  return `${d.getMonth() + 1}/${d.getDate()}(${WEEKDAY_JA[d.getDay()]}) ${String(d.getHours()).padStart(2, '0')}:${String(
-    d.getMinutes()
-  ).padStart(2, '0')}`;
+  const parts = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? '';
+  const month = get('month');
+  const day = get('day');
+  const hour = get('hour');
+  const minute = get('minute');
+
+  // 曜日はJST基準の年月日から算出する（Dateのローカルgetterはサーバーのタイムゾーンに依存するため使わない）
+  const jstMs = d.getTime() + JST_OFFSET_MINUTES * 60 * 1000;
+  const weekday = new Date(jstMs).getUTCDay();
+
+  return `${month}/${day}(${WEEKDAY_JA[weekday]}) ${hour}:${minute}`;
 }
 
 // ---- ルーティング ----
