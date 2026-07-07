@@ -20,6 +20,7 @@ const { google } = require('googleapis');
 const CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar'];
 const EVENT_DURATION_MIN = 30;       // 予定は 30 分枠
 const TIME_ZONE = 'Asia/Tokyo';      // タイムゾーンは固定
+const JST_OFFSET_MINUTES = 9 * 60;   // JSTのUTCからのオフセット（分）
 
 // JWT クライアントは使い回す（毎回作らない）
 let cachedCalendar = null;
@@ -71,6 +72,22 @@ function formatJst(iso) {
   }
 }
 
+// JST の壁時計としての「オフセットなし」日時文字列を作る（例: 2026-07-12T16:00:00）
+// Google Calendar API へ渡す際、UTCの Z 付き時刻と timeZone を同時に指定すると
+// 内部でタイムゾーン分が二重に適用されてしまう仕様の落とし穴があるため、
+// 「オフセットなしのローカル時刻文字列 + timeZone」という Google 推奨の形式に統一する。
+function toJstNaiveString(msUtc) {
+  const jstMs = msUtc + JST_OFFSET_MINUTES * 60 * 1000;
+  const d = new Date(jstMs);
+  const y = d.getUTCFullYear();
+  const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const da = String(d.getUTCDate()).padStart(2, '0');
+  const h = String(d.getUTCHours()).padStart(2, '0');
+  const mi = String(d.getUTCMinutes()).padStart(2, '0');
+  const s = String(d.getUTCSeconds()).padStart(2, '0');
+  return `${y}-${mo}-${da}T${h}:${mi}:${s}`;
+}
+
 // 予定の説明欄テキストを組み立てる
 function buildDescription({ name, phone, symptom, scheduledAt, lineUserId }) {
   const lines = [
@@ -115,8 +132,8 @@ async function createCalendarEvent({ name, phone, symptom, scheduledAt, lineUser
     return { ok: false, skipped: true };
   }
 
-  const startIso = new Date(startMs).toISOString();
-  const endIso = new Date(startMs + EVENT_DURATION_MIN * 60 * 1000).toISOString();
+  const startIso = toJstNaiveString(startMs);
+  const endIso = toJstNaiveString(startMs + EVENT_DURATION_MIN * 60 * 1000);
 
   const requestBody = {
     summary: `CLIVA予約：${name || '患者名未入力'}`,
