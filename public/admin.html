@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cliva®︎予約管理システム</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --page-bg:#F4F7F4;
+    --card-bg:#FFFFFF;
+    --border:#DCE5DF;
+    --border-strong:#A9C4B2;
+    --title:#33473C;
+    --sub:#6B7C71;
+    --accent:#3F6B52;
+    --accent-soft:#E8F0EA;
+    --danger:#B4453B;
+    --danger-soft:#F7E9E7;
+    --warn:#B98A2E;
+    --warn-soft:#FBF1DF;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:'Zen Maru Gothic', sans-serif;
+    background:var(--page-bg);
+    color:var(--title);
+    min-height:100vh;
+  }
+  header{
+    background:var(--card-bg);
+    border-bottom:1px solid var(--border);
+    padding:16px 20px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    position:sticky;
+    top:0;
+    z-index:10;
+  }
+  header h1{
+    font-size:18px;
+    margin:0;
+    font-weight:700;
+    color:var(--title);
+  }
+  header h1 span{ color:var(--accent); }
+  main{
+    max-width:1100px;
+    margin:0 auto;
+    padding:20px 16px 80px;
+  }
+  .tabs{
+    display:flex;
+    gap:8px;
+    margin-bottom:16px;
+    flex-wrap:wrap;
+  }
+  .tab-btn{
+    border:1px solid var(--border-strong);
+    background:var(--card-bg);
+    color:var(--sub);
+    padding:10px 18px;
+    border-radius:999px;
+    font-family:inherit;
+    font-size:14px;
+    font-weight:700;
+    cursor:pointer;
+    transition:.15s;
+  }
+  .tab-btn.active{
+    background:var(--accent);
+    border-color:var(--accent);
+    color:#fff;
+  }
+  .toolbar{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:12px;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .count-label{ color:var(--sub); font-size:13px; }
+  .btn{
+    border:none;
+    border-radius:10px;
+    padding:10px 16px;
+    font-family:inherit;
+    font-size:14px;
+    font-weight:700;
+    cursor:pointer;
+  }
+  .btn-primary{ background:var(--accent); color:#fff; }
+  .btn-outline{ background:#fff; color:var(--accent); border:1px solid var(--accent); }
+  .btn-danger{ background:var(--danger-soft); color:var(--danger); }
+  .btn-ghost{ background:transparent; color:var(--sub); text-decoration:underline; }
+  .btn:disabled{ opacity:.5; cursor:not-allowed; }
+
+  .list{ display:flex; flex-direction:column; gap:10px; }
+  .card{
+    background:var(--card-bg);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:16px;
+    display:grid;
+    grid-template-columns:1fr auto;
+    gap:8px 16px;
+    align-items:center;
+  }
+  .card-main{ cursor:pointer; }
+  .card-row1{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .card-datetime{ font-weight:700; font-size:15px; }
+  .badge{
+    font-size:12px;
+    font-weight:700;
+    padding:3px 10px;
+    border-radius:999px;
+  }
+  .badge-reserved{ background:var(--accent-soft); color:var(--accent); }
+  .badge-cancelled{ background:var(--danger-soft); color:var(--danger); }
+  .badge-overdue{ background:var(--warn-soft); color:var(--warn); }
+  .badge-outline{ background:#fff; border:1px solid var(--border-strong); color:var(--sub); }
+  .card-sub{ color:var(--sub); font-size:13px; margin-top:2px; }
+  .card-name{ font-size:15px; font-weight:700; margin-top:4px; }
+  .card-actions{ display:flex; flex-direction:column; gap:6px; align-items:stretch; }
+  .card-actions .btn{ white-space:nowrap; font-size:13px; padding:8px 12px; }
+
+  .empty{
+    text-align:center;
+    color:var(--sub);
+    padding:60px 20px;
+    background:var(--card-bg);
+    border-radius:14px;
+    border:1px dashed var(--border-strong);
+  }
+
+  .overlay{
+    position:fixed; inset:0;
+    background:rgba(51,71,60,.35);
+    display:none;
+    align-items:flex-start;
+    justify-content:center;
+    padding:24px 12px;
+    overflow-y:auto;
+    z-index:100;
+  }
+  .overlay.open{ display:flex; }
+  .modal{
+    background:#fff;
+    border-radius:16px;
+    max-width:480px;
+    width:100%;
+    padding:24px;
+    margin-top:20px;
+  }
+  .modal h2{ margin:0 0 4px; font-size:18px; color:var(--title); }
+  .modal .close-row{ display:flex; justify-content:flex-end; }
+  .modal .close-row button{
+    background:none; border:none; color:var(--sub); font-size:14px; cursor:pointer;
+  }
+  .field{ margin-bottom:14px; }
+  .field label{ display:block; font-size:13px; color:var(--sub); margin-bottom:4px; font-weight:700; }
+  .field input, .field select, .field textarea{
+    width:100%;
+    border:1px solid var(--border-strong);
+    border-radius:8px;
+    padding:9px 10px;
+    font-family:inherit;
+    font-size:14px;
+    color:var(--title);
+  }
+  .detail-row{ display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:14px; gap:12px; }
+  .detail-row .k{ color:var(--sub); flex-shrink:0; }
+  .detail-row .v{ text-align:right; font-weight:700; }
+  .section-title{ font-size:13px; font-weight:700; color:var(--accent); margin:18px 0 6px; }
+  .modal-actions{ display:flex; gap:8px; margin-top:18px; }
+  .modal-actions .btn{ flex:1; }
+  .error-text{ color:var(--danger); font-size:13px; margin-top:8px; display:none; }
+  @media (max-width:520px){
+    .card{ grid-template-columns:1fr; }
+    .card-actions{ flex-direction:row; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Cliva<span>®︎</span>予約管理システム</h1>
+</header>
+
+<main>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="list">予約一覧</button>
+    <button class="tab-btn" data-tab="no_show">未来院一覧</button>
+  </div>
+
+  <div class="toolbar">
+    <span class="count-label" id="countLabel"></span>
+    <button class="btn btn-primary" id="openNewBtn">＋ 新規予約追加</button>
+  </div>
+
+  <div class="list" id="listContainer"></div>
+</main>
+
+<!-- 詳細モーダル -->
+<div class="overlay" id="detailOverlay">
+  <div class="modal">
+    <div class="close-row"><button onclick="closeDetail()">閉じる ✕</button></div>
+    <h2>予約詳細</h2>
+    <div id="detailBody"></div>
+    <div class="modal-actions" id="detailActions"></div>
+  </div>
+</div>
+
+<!-- 新規予約モーダル -->
+<div class="overlay" id="newOverlay">
+  <div class="modal">
+    <div class="close-row"><button onclick="closeNew()">閉じる ✕</button></div>
+    <h2>新規予約追加</h2>
+    <p style="color:var(--sub);font-size:13px;margin-top:0;">電話予約・直接来院・受付での次回予約に使用します</p>
+
+    <div class="field">
+      <label>氏名</label>
+      <input id="newName" type="text" placeholder="山田 花子" />
+    </div>
+    <div class="field">
+      <label>電話番号</label>
+      <input id="newPhone" type="text" placeholder="090-1234-5678" />
+    </div>
+    <div class="field">
+      <label>予約日時</label>
+      <input id="newDatetime" type="datetime-local" />
+    </div>
+    <div class="field">
+      <label>主訴・ご相談内容</label>
+      <textarea id="newSymptom" rows="2" placeholder="任意"></textarea>
+    </div>
+    <div class="field">
+      <label>予約経路</label>
+      <select id="newSource">
+        <option value="phone">電話</option>
+        <option value="walk_in">直接来院</option>
+        <option value="staff">受付入力</option>
+      </select>
+    </div>
+    <div class="error-text" id="newError"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeNew()">キャンセル</button>
+      <button class="btn btn-primary" id="submitNewBtn">登録する</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentTab = 'list';
+let currentList = [];
+
+const SOURCE_LABEL = { line:'LINE', phone:'電話', walk_in:'直接来院', staff:'受付入力' };
+const STATUS_LABEL = { reserved:'予約済み', cancelled:'キャンセル済み', visited:'来院済み' };
+
+function fmtDatetime(iso){
+  const d = new Date(iso);
+  return new Intl.DateTimeFormat('ja-JP',{
+    timeZone:'Asia/Tokyo', month:'numeric', day:'numeric', weekday:'short',
+    hour:'2-digit', minute:'2-digit', hour12:false
+  }).format(d);
+}
+
+async function loadList(){
+  const container = document.getElementById('listContainer');
+  container.innerHTML = '<div class="empty">読み込み中…</div>';
+  try{
+    const res = await fetch(`/api/reservations?view=${currentTab}`);
+    const data = await res.json();
+    currentList = data.reservations || [];
+    renderList();
+  }catch(e){
+    container.innerHTML = '<div class="empty">読み込みに失敗しました。時間をおいて再度お試しください。</div>';
+  }
+}
+
+function renderList(){
+  const container = document.getElementById('listContainer');
+  document.getElementById('countLabel').textContent = `${currentList.length}件`;
+
+  if(currentList.length === 0){
+    container.innerHTML = `<div class="empty">${currentTab==='no_show' ? '未来院の患者はいません' : '予約はまだありません'}</div>`;
+    return;
+  }
+
+  container.innerHTML = '';
+  currentList.forEach(r => {
+    const card = document.createElement('div');
+    card.className = 'card';
+
+    const statusBadge = r.status === 'cancelled'
+      ? `<span class="badge badge-cancelled">${STATUS_LABEL[r.status]}</span>`
+      : `<span class="badge badge-reserved">${STATUS_LABEL[r.status]}</span>`;
+
+    const overdueBadge = currentTab === 'no_show'
+      ? `<span class="badge badge-overdue">${r.overdue_label}</span>` : '';
+
+    const qBadge = r.questionnaire_submitted
+      ? `<span class="badge badge-outline">問診 入力済み</span>`
+      : `<span class="badge badge-outline">問診 未入力</span>`;
+
+    card.innerHTML = `
+      <div class="card-main" onclick="openDetail(${r.id})">
+        <div class="card-row1">
+          <span class="card-datetime">${fmtDatetime(r.scheduled_at)}</span>
+          ${statusBadge}
+          ${overdueBadge}
+          <span class="badge badge-outline">${SOURCE_LABEL[r.source] || r.source || '-'}</span>
+          ${qBadge}
+        </div>
+        <div class="card-name">${escapeHtml(r.name) || '(氏名未登録)'}</div>
+        <div class="card-sub">${escapeHtml(r.phone) || ''} ／ ${escapeHtml(r.symptom) || '主訴未記入'}</div>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-outline" onclick="openDetail(${r.id})">詳細を見る</button>
+        ${r.status === 'reserved' ? `<button class="btn btn-primary" onclick="updateStatus(${r.id},'visited')">来院済みにする</button>` : ''}
+        ${r.status === 'reserved' ? `<button class="btn btn-danger" onclick="updateStatus(${r.id},'cancelled')">キャンセル済みにする</button>` : ''}
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+function escapeHtml(str){
+  if(!str) return '';
+  return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function updateStatus(id, status){
+  const label = status === 'visited' ? '来院済み' : 'キャンセル済み';
+  if(!confirm(`この予約を「${label}」にしますか？`)) return;
+  try{
+    const res = await fetch(`/api/reservations/${id}/status`, {
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ status })
+    });
+    if(!res.ok) throw new Error();
+    await loadList();
+    closeDetail();
+  }catch(e){
+    alert('更新に失敗しました。時間をおいて再度お試しください。');
+  }
+}
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    currentTab = btn.dataset.tab;
+    loadList();
+  });
+});
+
+// ---- 詳細モーダル ----
+async function openDetail(id){
+  const overlay = document.getElementById('detailOverlay');
+  const body = document.getElementById('detailBody');
+  const actions = document.getElementById('detailActions');
+  body.innerHTML = '読み込み中…';
+  actions.innerHTML = '';
+  overlay.classList.add('open');
+
+  try{
+    const res = await fetch(`/api/reservations/${id}`);
+    const data = await res.json();
+    const r = data.reservation;
+
+    const q = r.questionnaire;
+    const rows = [
+      ['氏名', escapeHtml(r.name) || '-'],
+      ['電話番号', escapeHtml(r.phone) || '-'],
+      ['予約日時', fmtDatetime(r.scheduled_at)],
+      ['状態', STATUS_LABEL[r.status] || r.status],
+      ['予約経路', SOURCE_LABEL[r.source] || r.source || '-'],
+      ['問診入力状況', r.questionnaire_submitted ? '入力済み' : '未入力'],
+    ];
+
+    let html = rows.map(([k,v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+
+    if(q){
+      html += `<div class="section-title">問診内容</div>`;
+      const qrows = [
+        ['生年月日', q.birth_date || '-'],
+        ['性別', q.gender || '-'],
+        ['本日相談したい内容', q.consult_content || '-'],
+        ['症状の時期', q.symptom_since || '-'],
+        ['服用中の薬', q.current_medication || '(なし/未記入)'],
+        ['アレルギー', q.allergies || '(なし/未記入)'],
+        ['既往歴', q.medical_history || '(なし/未記入)'],
+      ];
+      html += qrows.map(([k,v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${escapeHtml(String(v))}</span></div>`).join('');
+    }
+
+    body.innerHTML = html;
+
+    let actionsHtml = '';
+    if(r.status === 'reserved'){
+      actionsHtml += `<button class="btn btn-primary" onclick="updateStatus(${r.id},'visited')">来院済みにする</button>`;
+      actionsHtml += `<button class="btn btn-danger" onclick="updateStatus(${r.id},'cancelled')">キャンセル済みにする</button>`;
+    }
+    actions.innerHTML = actionsHtml;
+  }catch(e){
+    body.innerHTML = '読み込みに失敗しました。';
+  }
+}
+function closeDetail(){ document.getElementById('detailOverlay').classList.remove('open'); }
+
+// ---- 新規予約モーダル ----
+function openNew(){
+  document.getElementById('newName').value = '';
+  document.getElementById('newPhone').value = '';
+  document.getElementById('newDatetime').value = '';
+  document.getElementById('newSymptom').value = '';
+  document.getElementById('newSource').value = 'phone';
+  document.getElementById('newError').style.display = 'none';
+  document.getElementById('newOverlay').classList.add('open');
+}
+function closeNew(){ document.getElementById('newOverlay').classList.remove('open'); }
+document.getElementById('openNewBtn').addEventListener('click', openNew);
+
+document.getElementById('submitNewBtn').addEventListener('click', async () => {
+  const name = document.getElementById('newName').value.trim();
+  const phone = document.getElementById('newPhone').value.trim();
+  const datetimeLocal = document.getElementById('newDatetime').value;
+  const symptom = document.getElementById('newSymptom').value.trim();
+  const source = document.getElementById('newSource').value;
+  const errorEl = document.getElementById('newError');
+
+  if(!name || !phone || !datetimeLocal){
+    errorEl.textContent = '氏名・電話番号・予約日時は必須です';
+    errorEl.style.display = 'block';
+    return;
+  }
+
+  // datetime-local はJSTのローカル時刻として入力されるため、そのままISO(+09:00)として送る
+  const scheduledAt = `${datetimeLocal}:00+09:00`;
+
+  try{
+    const res = await fetch('/api/reservations', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name, phone, scheduled_at: scheduledAt, symptom, source })
+    });
+    const data = await res.json();
+    if(!res.ok){
+      errorEl.textContent = data.error || '登録に失敗しました';
+      errorEl.style.display = 'block';
+      return;
+    }
+    closeNew();
+    await loadList();
+  }catch(e){
+    errorEl.textContent = '登録に失敗しました。時間をおいて再度お試しください。';
+    errorEl.style.display = 'block';
+  }
+});
+
+loadList();
+</script>
+</body>
+</html>
