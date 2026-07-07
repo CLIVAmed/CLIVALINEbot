@@ -161,4 +161,119 @@ async function createCalendarEvent({ name, phone, symptom, scheduledAt, lineUser
   }
 }
 
-module.exports = { createCalendarEvent, isCalendarConfigured };
+/**
+ * 既存のGoogleカレンダー予定の日時・内容を更新する（予約の日時変更用）。
+ * createCalendarEventと同じ形式のリクエストボディを組み立て、insertの代わりにpatchする。
+ *
+ * @param {Object} params
+ * @param {string} params.eventId       更新対象のGoogleカレンダーイベントID
+ * @param {string} params.name
+ * @param {string} params.phone
+ * @param {string} params.symptom
+ * @param {string} params.scheduledAt   新しい予約日時（ISO 8601文字列）
+ * @param {string} [params.lineUserId]
+ * @returns {Promise<{ok:boolean, skipped?:boolean, eventId?:string, error?:string}>}
+ */
+async function updateCalendarEvent({ eventId, name, phone, symptom, scheduledAt, lineUserId } = {}) {
+  if (!isCalendarConfigured()) {
+    console.warn('[calendar] Google カレンダー未設定のため更新をスキップしました。');
+    return { ok: false, skipped: true };
+  }
+  if (!eventId) {
+    console.error('[calendar] eventId が指定されていないため更新できません。');
+    return { ok: false, skipped: true };
+  }
+
+  const startMs = new Date(scheduledAt).getTime();
+  if (!scheduledAt || Number.isNaN(startMs)) {
+    console.error(`[calendar] scheduledAt が不正なため予定を更新できません: ${scheduledAt}`);
+    return { ok: false, skipped: true };
+  }
+
+  const startIso = toJstNaiveString(startMs);
+  const endIso = toJstNaiveString(startMs + EVENT_DURATION_MIN * 60 * 1000);
+
+  const requestBody = {
+    summary: `CLIVA予約：${name || '患者名未入力'}`,
+    description: buildDescription({ name, phone, symptom, scheduledAt, lineUserId }),
+    start: { dateTime: startIso, timeZone: TIME_ZONE },
+    end: { dateTime: endIso, timeZone: TIME_ZONE },
+  };
+
+  try {
+    const calendar = getCalendarClient();
+    const res = await calendar.events.patch({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      eventId,
+      requestBody,
+    });
+    console.log(`[calendar] 予定を更新しました eventId=${res.data.id}`);
+    return { ok: true, eventId: res.data.id };
+  } catch (err) {
+    const detail =
+      (err && err.response && err.response.data && JSON.stringify(err.response.data)) ||
+      (err && err.message) ||
+      String(err);
+    console.error(`[calendar] 予定の更新に失敗しました: ${detail}`);
+    return { ok: false, error: detail };
+  }
+}
+
+// キャンセル済みの予定を目立たせるための色（Googleカレンダーの標準色ID。'11' はトマト/赤系）
+const CANCELLED_COLOR_ID = '11';
+const CANCELLED_PREFIX = '【キャンセル済み】';
+
+/**
+ * Googleカレンダーの予定を「キャンセル済み」として強調表示する。
+ * 予定自体は削除せず、タイトルに接頭辞を付け、色を変更し、説明欄にも注記を追加する。
+ * （削除しない理由：スタッフが後から履歴を確認できるようにするため）
+ *
+ * @param {Object} params
+ * @param {string} params.eventId  対象のGoogleカレンダーイベントID
+ * @returns {Promise<{ok:boolean, skipped?:boolean, eventId?:string, error?:string}>}
+ */
+async function markCalendarEventCancelled({ eventId } = {}) {
+  if (!isCalendarConfigured()) {
+    console.warn('[calendar] Google カレンダー未設定のためキャンセル反映をスキップしました。');
+    return { ok: false, skipped: true };
+  }
+  if (!eventId) {
+    console.error('[calendar] eventId が指定されていないためキャンセル反映できません。');
+    return { ok: false, skipped: true };
+  }
+
+  try {
+    const calendar = getCalendarClient();
+    const { data: existing } = await calendar.events.get({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      eventId,
+    });
+
+    const alreadyMarked = (existing.summary || '').startsWith(CANCELLED_PREFIX);
+    const newSummary = alreadyMarked ? existing.summary : `${CANCELLED_PREFIX}${existing.summary || ''}`;
+    const newDescription = alreadyMarked
+      ? existing.description
+      : `${existing.description || ''}\n\n※このご予約は患者様によりキャンセルされました。`;
+
+    const res = await calendar.events.patch({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      eventId,
+      requestBody: {
+        summary: newSummary,
+        description: newDescription,
+        colorId: CANCELLED_COLOR_ID,
+      },
+    });
+    console.log(`[calendar] 予定をキャンセル済み表示にしました eventId=${res.data.id}`);
+    return { ok: true, eventId: res.data.id };
+  } catch (err) {
+    const detail =
+      (err && err.response && err.response.data && JSON.stringify(err.response.data)) ||
+      (err && err.message) ||
+      String(err);
+    console.error(`[calendar] キャンセル反映に失敗しました: ${detail}`);
+    return { ok: false, error: detail };
+  }
+}
+
+module.exports = { createCalendarEvent, updateCalendarEvent, markCalendarEventCancelled, isCalendarConfigured };
