@@ -4,6 +4,14 @@
 //
 // 診療科の選択ステップは廃止しました。予約データ上は department を空欄のまま保存し、
 // 受診科はスタッフが後から電話・問診等で確認して入力する運用を前提としています。
+//
+// ---- マルチクリニックSaaS化 Phase 3（2026-07-10）----
+// 従来は起動時に1つの LINEクライアント（config/client）だけをグローバルに生成していましたが、
+// 医院ごとに異なる LINEチャネル・診療枠設定（診療時間・枠の刻み・同時受付上限）に対応するため、
+// リクエスト（Webhook呼び出し）ごとに「どの医院宛てか」を解決し、その医院用の情報をまとめた
+// ctx オブジェクト（clinicContext.js参照）を各処理関数に引き回す構成に変更しています。
+// 変更点の詳細は CLIVA_SAAS化_実装ロードマップ.md の Phase 3、
+// および CLIVA_SaaS化_Phase3_診療枠コード変更案.md を参照してください。
 
 require('dotenv').config();
 const path = require('path');
@@ -12,18 +20,13 @@ const line = require('@line/bot-sdk');
 const { createClient } = require('@supabase/supabase-js');
 const { createCalendarEvent, updateCalendarEvent, markCalendarEventCancelled } = require('./googleCalendar');
 const { createAdminRouter } = require('./admin');
-
-const config = {
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET,
-};
+const { fetchClinicRow, buildClinicContext } = require('./clinicContext');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const client = new line.Client(config);
 const app = express();
 
 // ---- 落ち着いたセージグリーン系のカラートークン（LPと統一） ----
@@ -37,36 +40,6 @@ const COLORS = {
 };
 
 const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
-
-// ---- 営業時間・予約枠の設定 ----
-// 営業時間: 10:00〜13:00 / 15:00〜18:00、30分刻みの枠
-// 各枠の予約上限（同じ枠に何件まで予約を受け付けるか）
-const BUSINESS_HOURS = [
-  { start: '10:00', end: '13:00' },
-  { start: '15:00', end: '18:00' },
-];
-const SLOT_INTERVAL_MIN = 30;
-const MAX_RESERVATIONS_PER_SLOT = 3;
-
-// 営業時間・枠間隔から "9:00" 形式の時間ラベル一覧を自動生成する
-function generateTimeSlots() {
-  const slots = [];
-  for (const range of BUSINESS_HOURS) {
-    const [startH, startM] = range.start.split(':').map(Number);
-    const [endH, endM] = range.end.split(':').map(Number);
-    let cur = startH * 60 + startM;
-    const endTotalMin = endH * 60 + endM;
-    // 「枠の開始時刻＋枠の長さ」が営業終了時刻を超えない範囲だけ枠を作る
-    while (cur + SLOT_INTERVAL_MIN <= endTotalMin) {
-      const h = Math.floor(cur / 60);
-      const m = cur % 60;
-      slots.push(`${h}:${String(m).padStart(2, '0')}`);
-      cur += SLOT_INTERVAL_MIN;
-    }
-  }
-  return slots;
-}
-const TIME_SLOTS = generateTimeSlots();
 
 // ---- タイムゾーン関連ヘルパー ----
 // 本番(Render等)のサーバーはUTCで動作するため、サーバーのローカル時刻(new Date()の
@@ -119,11 +92,13 @@ function jstDayRangeIso(dateIso) {
 
 // 指定日の「枠ごとの予約件数」を取得する（キャンセル済みは除外）
 // 取得に失敗した場合は空オブジェクトを返す＝満枠判定をせず通常表示にする（安全側に倒す）
-async function getBookedCountsForDate(dateIso) {
+// ctx.clinicId で自院のデータだけに絞り込む
+async function getBookedCountsForDate(ctx, dateIso) {
   const { startIso, endIso } = jstDayRangeIso(dateIso);
   const { data, error } = await supabase
     .from('reservations')
     .select('scheduled_at')
+    .eq('clinic_id', ctx.clinicId)
     .gte('scheduled_at', startIso)
     .lt('scheduled_at', endIso)
     .neq('status', 'cancelled');
@@ -142,27 +117,29 @@ async function getBookedCountsForDate(dateIso) {
 }
 
 // 指定した日時（ISO文字列）が、すでに上限件数に達しているかを調べる
-async function isSlotFull(datetimeIso) {
+// 上限件数は ctx.clinicConfig.maxReservationsPerSlot（医院ごとの設定）を使う
+async function isSlotFull(ctx, datetimeIso) {
   const d = new Date(datetimeIso);
   const jstMs = d.getTime() + JST_OFFSET_MINUTES * 60 * 1000;
   const jstDate = new Date(jstMs);
   const dateIso = `${jstDate.getUTCFullYear()}-${String(jstDate.getUTCMonth() + 1).padStart(2, '0')}-${String(
     jstDate.getUTCDate()
   ).padStart(2, '0')}`;
-  const counts = await getBookedCountsForDate(dateIso);
+  const counts = await getBookedCountsForDate(ctx, dateIso);
   const normalizedIso = new Date(datetimeIso).toISOString();
-  return (counts[normalizedIso] || 0) >= MAX_RESERVATIONS_PER_SLOT;
+  return (counts[normalizedIso] || 0) >= ctx.clinicConfig.maxReservationsPerSlot;
 }
 
 // ---- 指定日付に対する時間候補（JST基準・満枠判定つき） ----
-async function buildTimeOptionsForDate(dateIso) {
+// 時間候補一覧は ctx.clinicConfig.timeSlots（医院ごとの診療時間・枠の刻みから生成済み）を使う
+async function buildTimeOptionsForDate(ctx, dateIso) {
   const [y, m, d] = dateIso.split('-').map(Number);
-  const counts = await getBookedCountsForDate(dateIso);
-  return TIME_SLOTS.map((t) => {
+  const counts = await getBookedCountsForDate(ctx, dateIso);
+  return ctx.clinicConfig.timeSlots.map((t) => {
     const [h, min] = t.split(':').map(Number);
     const iso = jstToIsoString(y, m, d, h, min);
     const bookedCount = counts[iso] || 0;
-    const full = bookedCount >= MAX_RESERVATIONS_PER_SLOT;
+    const full = bookedCount >= ctx.clinicConfig.maxReservationsPerSlot;
     return { label: t, iso, full };
   });
 }
@@ -255,7 +232,7 @@ function buildCardSelectFlex({ altText, heading, subheading, options, footerOpti
 }
 
 // ---- 日付選択カードを送信 ----
-function sendDateCards(replyToken) {
+function sendDateCards(ctx, replyToken) {
   const dateOptions = buildDateOptions();
   const flex = buildCardSelectFlex({
     altText: 'ご希望の日付を選んでください',
@@ -267,12 +244,12 @@ function sendDateCards(replyToken) {
       displayText: d.label,
     })),
   });
-  return client.replyMessage(replyToken, flex);
+  return ctx.client.replyMessage(replyToken, flex);
 }
 
 // ---- 時間選択カードを送信（「日付選びなおし」の戻るカード付き、満枠は表示のみでタップ不可） ----
-async function sendTimeCards(replyToken, dateIso, dateLabel) {
-  const timeOptions = await buildTimeOptionsForDate(dateIso);
+async function sendTimeCards(ctx, replyToken, dateIso, dateLabel) {
+  const timeOptions = await buildTimeOptionsForDate(ctx, dateIso);
   const flex = buildCardSelectFlex({
     altText: 'ご希望の時間を選んでください',
     heading: 'ご希望の時間を選んでください',
@@ -291,14 +268,18 @@ async function sendTimeCards(replyToken, dateIso, dateLabel) {
       },
     ],
   });
-  return client.replyMessage(replyToken, flex);
+  return ctx.client.replyMessage(replyToken, flex);
 }
 
 // ---- セッション取得・更新 ----
-async function getSession(lineUserId) {
+// user_sessions はまだ (clinic_id, line_user_id) の複合一意制約になっていないため
+// （一意制約の見直しはPhase 3のコード安定後に実施予定）、
+// 現時点では clinic_id を条件・保存値として追加するに留めている
+async function getSession(ctx, lineUserId) {
   const { data } = await supabase
     .from('user_sessions')
     .select('*')
+    .eq('clinic_id', ctx.clinicId)
     .eq('line_user_id', lineUserId)
     .maybeSingle();
 
@@ -306,20 +287,21 @@ async function getSession(lineUserId) {
 
   const { data: created } = await supabase
     .from('user_sessions')
-    .insert({ line_user_id: lineUserId, state: 'DATE' })
+    .insert({ clinic_id: ctx.clinicId, line_user_id: lineUserId, state: 'DATE' })
     .select()
     .single();
   return created;
 }
 
-async function updateSession(lineUserId, patch) {
+async function updateSession(ctx, lineUserId, patch) {
   await supabase
     .from('user_sessions')
     .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('clinic_id', ctx.clinicId)
     .eq('line_user_id', lineUserId);
 }
 
-async function resetSession(lineUserId) {
+async function resetSession(ctx, lineUserId) {
   await supabase
     .from('user_sessions')
     .update({
@@ -333,22 +315,29 @@ async function resetSession(lineUserId) {
       target_reservation_id: null,
       updated_at: new Date().toISOString(),
     })
+    .eq('clinic_id', ctx.clinicId)
     .eq('line_user_id', lineUserId);
 }
 
 // ---- 予約確定処理 ----
 // department は空欄（null）で保存し、受診科はスタッフが後から確認・入力する。
-async function finalizeReservation(lineUserId, session) {
+async function finalizeReservation(ctx, lineUserId, session) {
   let { data: patient } = await supabase
     .from('patients')
     .select('*')
+    .eq('clinic_id', ctx.clinicId)
     .eq('line_user_id', lineUserId)
     .maybeSingle();
 
   if (!patient) {
     const { data: created } = await supabase
       .from('patients')
-      .insert({ line_user_id: lineUserId, name: session.temp_name, phone: session.temp_phone })
+      .insert({
+        clinic_id: ctx.clinicId,
+        line_user_id: lineUserId,
+        name: session.temp_name,
+        phone: session.temp_phone,
+      })
       .select()
       .single();
     patient = created;
@@ -365,6 +354,7 @@ async function finalizeReservation(lineUserId, session) {
   const { data: reservation } = await supabase
     .from('reservations')
     .insert({
+      clinic_id: ctx.clinicId,
       patient_id: patient.id,
       department: null, // 受診科は未確定。スタッフが後から確認・入力する
       scheduled_at: session.temp_datetime,
@@ -384,6 +374,7 @@ async function finalizeReservation(lineUserId, session) {
   // Google カレンダーへ予定を自動作成する。
   // ここでの失敗は予約完了を妨げない（失敗しても予約は確定させ、ログだけ残す）。
   // 認証情報が未設定の場合は googleCalendar 側でスキップされる。
+  // 注意：Googleカレンダー連携はまだ医院ごとに分離していない（Phase 6で対応予定）。
   try {
     const calendarResult = await createCalendarEvent({
       name: session.temp_name,
@@ -412,7 +403,7 @@ async function finalizeReservation(lineUserId, session) {
     );
   }
 
-  await resetSession(lineUserId);
+  await resetSession(ctx, lineUserId);
   return reservation;
 }
 
@@ -421,10 +412,11 @@ async function finalizeReservation(lineUserId, session) {
 // LINEユーザーの直近の有効な予約（来院前・現在時刻より後）を「すべて」取得する。
 // 複数件の予約を持つ患者でも、どの予約を変更・キャンセルしたいか選べるようにするため、
 // 以前のように .limit(1) で1件だけに絞らない。
-async function findUpcomingReservations(lineUserId) {
+async function findUpcomingReservations(ctx, lineUserId) {
   const { data: patient } = await supabase
     .from('patients')
     .select('id')
+    .eq('clinic_id', ctx.clinicId)
     .eq('line_user_id', lineUserId)
     .maybeSingle();
   if (!patient) return [];
@@ -433,6 +425,7 @@ async function findUpcomingReservations(lineUserId) {
   const { data } = await supabase
     .from('reservations')
     .select('*')
+    .eq('clinic_id', ctx.clinicId)
     .eq('patient_id', patient.id)
     .eq('status', 'reserved')
     .gte('scheduled_at', nowIso)
@@ -463,11 +456,11 @@ function buildChangeCancelOptionsFlex(reservation) {
 
 // 「変更」「キャンセル」キーワードへの入口。
 // 有効な予約が2件以上ある場合は、まずどの予約を対象にするか選んでもらう。
-async function handleChangeCancelMenu(event, lineUserId) {
-  const reservations = await findUpcomingReservations(lineUserId);
+async function handleChangeCancelMenu(ctx, event, lineUserId) {
+  const reservations = await findUpcomingReservations(ctx, lineUserId);
 
   if (reservations.length === 0) {
-    return client.replyMessage(event.replyToken, {
+    return ctx.client.replyMessage(event.replyToken, {
       type: 'text',
       text:
         '現在お受けしている有効なご予約が見つかりませんでした。\n' +
@@ -476,7 +469,7 @@ async function handleChangeCancelMenu(event, lineUserId) {
   }
 
   if (reservations.length === 1) {
-    return client.replyMessage(event.replyToken, buildChangeCancelOptionsFlex(reservations[0]));
+    return ctx.client.replyMessage(event.replyToken, buildChangeCancelOptionsFlex(reservations[0]));
   }
 
   // 予約が複数ある場合は、まず対象を選んでもらう
@@ -490,22 +483,23 @@ async function handleChangeCancelMenu(event, lineUserId) {
       displayText: `${formatDatetime(r.scheduled_at)}の予約`,
     })),
   });
-  return client.replyMessage(event.replyToken, flex);
+  return ctx.client.replyMessage(event.replyToken, flex);
 }
 
 // 日時変更フローの最終処理：予約の日時を更新し、Googleカレンダーの予定も追随して更新する
-async function finalizeReschedule(event, lineUserId, session, newDatetimeIso) {
+async function finalizeReschedule(ctx, event, lineUserId, session, newDatetimeIso) {
   const targetId = session.target_reservation_id;
 
   const { data: reservation } = await supabase
     .from('reservations')
     .select('*')
+    .eq('clinic_id', ctx.clinicId)
     .eq('id', targetId)
     .maybeSingle();
 
   if (!reservation || reservation.status !== 'reserved') {
-    await resetSession(lineUserId);
-    return client.replyMessage(event.replyToken, {
+    await resetSession(ctx, lineUserId);
+    return ctx.client.replyMessage(event.replyToken, {
       type: 'text',
       text:
         'このご予約はすでに変更・キャンセル済み、または見つかりませんでした。\n' +
@@ -541,9 +535,9 @@ async function finalizeReschedule(event, lineUserId, session, newDatetimeIso) {
     }
   }
 
-  await resetSession(lineUserId);
+  await resetSession(ctx, lineUserId);
 
-  return client.replyMessage(event.replyToken, {
+  return ctx.client.replyMessage(event.replyToken, {
     type: 'text',
     text:
       `ご予約を変更しました。\n${formatDatetime(updated.scheduled_at)}\n予約番号　${updated.reservation_no}\n\n` +
@@ -553,39 +547,39 @@ async function finalizeReschedule(event, lineUserId, session, newDatetimeIso) {
 }
 
 // ---- テキストメッセージのハンドラ（氏名・電話・症状入力ステップ） ----
-async function handleTextMessage(event) {
+async function handleTextMessage(ctx, event) {
   const lineUserId = event.source.userId;
   const text = event.message.text.trim();
-  const session = await getSession(lineUserId);
+  const session = await getSession(ctx, lineUserId);
 
   // 「変更」「キャンセル」というキーワードには、会話の途中状態に関わらず反応する
   if (text.includes('変更') || text.includes('キャンセル')) {
-    return handleChangeCancelMenu(event, lineUserId);
+    return handleChangeCancelMenu(ctx, event, lineUserId);
   }
 
   // 「予約」等のキーワードでいつでもリセットして最初から
   if (text.includes('予約') && session.state !== 'DATE') {
-    await resetSession(lineUserId);
-    return sendDateCards(event.replyToken);
+    await resetSession(ctx, lineUserId);
+    return sendDateCards(ctx, event.replyToken);
   }
 
   switch (session.state) {
     case 'DATE':
     case 'TIME':
       // 日時選択中はカードのタップ（postback）を待つ。テキストが来たら案内し直す。
-      return sendDateCards(event.replyToken);
+      return sendDateCards(ctx, event.replyToken);
 
     case 'INFO_NAME': {
-      await updateSession(lineUserId, { temp_name: text, state: 'INFO_PHONE' });
-      return client.replyMessage(event.replyToken, {
+      await updateSession(ctx, lineUserId, { temp_name: text, state: 'INFO_PHONE' });
+      return ctx.client.replyMessage(event.replyToken, {
         type: 'text',
         text: 'お名前を確認しました。\nお電話番号を教えてください（例：090-1234-5678）',
       });
     }
 
     case 'INFO_PHONE': {
-      await updateSession(lineUserId, { temp_phone: text, state: 'INFO_SYMPTOM' });
-      return client.replyMessage(event.replyToken, {
+      await updateSession(ctx, lineUserId, { temp_phone: text, state: 'INFO_SYMPTOM' });
+      return ctx.client.replyMessage(event.replyToken, {
         type: 'text',
         text: '症状やご相談内容を教えてください',
       });
@@ -593,8 +587,8 @@ async function handleTextMessage(event) {
 
     case 'INFO_SYMPTOM': {
       const updatedSession = { ...session, temp_symptom: text };
-      await updateSession(lineUserId, { temp_symptom: text, state: 'DONE' });
-      const reservation = await finalizeReservation(lineUserId, updatedSession);
+      await updateSession(ctx, lineUserId, { temp_symptom: text, state: 'DONE' });
+      const reservation = await finalizeReservation(ctx, lineUserId, updatedSession);
       const messages = [
         {
           type: 'text',
@@ -621,20 +615,20 @@ async function handleTextMessage(event) {
         });
       }
 
-      return client.replyMessage(event.replyToken, messages);
+      return ctx.client.replyMessage(event.replyToken, messages);
     }
 
     default: {
-      await resetSession(lineUserId);
-      return sendDateCards(event.replyToken);
+      await resetSession(ctx, lineUserId);
+      return sendDateCards(ctx, event.replyToken);
     }
   }
 }
 
 // ---- ポストバックのハンドラ（日付・時間カードのタップ） ----
-async function handlePostback(event) {
+async function handlePostback(ctx, event) {
   const lineUserId = event.source.userId;
-  const session = await getSession(lineUserId);
+  const session = await getSession(ctx, lineUserId);
   const params = new URLSearchParams(event.postback.data);
   const action = params.get('action');
 
@@ -643,8 +637,8 @@ async function handlePostback(event) {
     const dateOptions = buildDateOptions();
     const matched = dateOptions.find((d) => d.iso === dateIso);
     const dateLabel = matched ? matched.label : dateIso;
-    await updateSession(lineUserId, { temp_date: dateIso, state: 'TIME' });
-    return sendTimeCards(event.replyToken, dateIso, dateLabel);
+    await updateSession(ctx, lineUserId, { temp_date: dateIso, state: 'TIME' });
+    return sendTimeCards(ctx, event.replyToken, dateIso, dateLabel);
   }
 
   if (action === 'selectTime') {
@@ -652,13 +646,13 @@ async function handlePostback(event) {
 
     // タップした瞬間と実際の処理の間にわずかな時間差があるため、
     // 他の患者がほぼ同時に予約して枠が埋まった場合に備えて再チェックする
-    const full = await isSlotFull(datetimeIso);
+    const full = await isSlotFull(ctx, datetimeIso);
     if (full) {
       const dateIso = session.temp_date;
       const dateOptions = buildDateOptions();
       const matched = dateOptions.find((d) => d.iso === dateIso);
       const dateLabel = matched ? matched.label : dateIso;
-      const timeOptions = await buildTimeOptionsForDate(dateIso);
+      const timeOptions = await buildTimeOptionsForDate(ctx, dateIso);
       const flex = buildCardSelectFlex({
         altText: 'ご希望の時間を選んでください',
         heading: 'ご希望の時間を選んでください',
@@ -678,7 +672,7 @@ async function handlePostback(event) {
         ],
       });
       // replyTokenは1回しか使えないため、案内メッセージとカードを1回のreplyで両方送る
-      return client.replyMessage(event.replyToken, [
+      return ctx.client.replyMessage(event.replyToken, [
         {
           type: 'text',
           text: '申し訳ございません、ちょうどこの時間は満枠になってしまいました。他の時間をお選びください。',
@@ -689,11 +683,11 @@ async function handlePostback(event) {
 
     // 「予約変更」フローの場合は、氏名等の再入力はせず、この時点で変更を確定させる
     if (session.mode === 'reschedule' && session.target_reservation_id) {
-      return finalizeReschedule(event, lineUserId, session, datetimeIso);
+      return finalizeReschedule(ctx, event, lineUserId, session, datetimeIso);
     }
 
-    await updateSession(lineUserId, { temp_datetime: datetimeIso, state: 'INFO_NAME' });
-    return client.replyMessage(event.replyToken, {
+    await updateSession(ctx, lineUserId, { temp_datetime: datetimeIso, state: 'INFO_NAME' });
+    return ctx.client.replyMessage(event.replyToken, {
       type: 'text',
       text: 'お名前を教えてください（例：山田 花子）',
     });
@@ -705,17 +699,18 @@ async function handlePostback(event) {
     const { data: reservation } = await supabase
       .from('reservations')
       .select('*')
+      .eq('clinic_id', ctx.clinicId)
       .eq('id', rid)
       .maybeSingle();
 
     if (!reservation || reservation.status !== 'reserved') {
-      return client.replyMessage(event.replyToken, {
+      return ctx.client.replyMessage(event.replyToken, {
         type: 'text',
         text: 'このご予約はすでに変更・キャンセル済み、または見つかりませんでした。',
       });
     }
 
-    return client.replyMessage(event.replyToken, buildChangeCancelOptionsFlex(reservation));
+    return ctx.client.replyMessage(event.replyToken, buildChangeCancelOptionsFlex(reservation));
   }
 
   // 「変更」「キャンセル」メニューでの選択（cxlMenu = cancel/change menu）
@@ -727,18 +722,19 @@ async function handlePostback(event) {
     const { data: reservation } = await supabase
       .from('reservations')
       .select('*')
+      .eq('clinic_id', ctx.clinicId)
       .eq('id', rid)
       .maybeSingle();
 
     if (!reservation || reservation.status !== 'reserved') {
-      return client.replyMessage(event.replyToken, {
+      return ctx.client.replyMessage(event.replyToken, {
         type: 'text',
         text: 'このご予約はすでに変更・キャンセル済み、または見つかりませんでした。',
       });
     }
 
     if (value === 'change') {
-      await updateSession(lineUserId, {
+      await updateSession(ctx, lineUserId, {
         mode: 'reschedule',
         target_reservation_id: reservation.id,
         state: 'DATE',
@@ -756,7 +752,7 @@ async function handlePostback(event) {
           displayText: d.label,
         })),
       });
-      return client.replyMessage(event.replyToken, flex);
+      return ctx.client.replyMessage(event.replyToken, flex);
     }
 
     if (value === 'cancel') {
@@ -777,7 +773,7 @@ async function handlePostback(event) {
           },
         ],
       });
-      return client.replyMessage(event.replyToken, flex);
+      return ctx.client.replyMessage(event.replyToken, flex);
     }
   }
 
@@ -787,7 +783,7 @@ async function handlePostback(event) {
     const rid = params.get('rid');
 
     if (value === 'no') {
-      return client.replyMessage(event.replyToken, {
+      return ctx.client.replyMessage(event.replyToken, {
         type: 'text',
         text: 'キャンセルを取りやめました。',
       });
@@ -796,11 +792,12 @@ async function handlePostback(event) {
     const { data: reservation } = await supabase
       .from('reservations')
       .select('*')
+      .eq('clinic_id', ctx.clinicId)
       .eq('id', rid)
       .maybeSingle();
 
     if (!reservation || reservation.status !== 'reserved') {
-      return client.replyMessage(event.replyToken, {
+      return ctx.client.replyMessage(event.replyToken, {
         type: 'text',
         text: 'このご予約はすでに処理済み、または見つかりませんでした。',
       });
@@ -814,7 +811,7 @@ async function handlePostback(event) {
     if (cancelUpdateError) {
       // 更新に失敗した場合は、患者に「キャンセル完了」と誤って伝えないようにする
       console.error(`[cancel] 予約 ${rid} のキャンセル処理に失敗しました:`, cancelUpdateError.message);
-      return client.replyMessage(event.replyToken, {
+      return ctx.client.replyMessage(event.replyToken, {
         type: 'text',
         text: '申し訳ございません、キャンセル処理に失敗しました。お手数ですがクリニックまでご連絡ください。',
       });
@@ -830,7 +827,7 @@ async function handlePostback(event) {
       }
     }
 
-    return client.replyMessage(event.replyToken, {
+    return ctx.client.replyMessage(event.replyToken, {
       type: 'text',
       text:
         `${formatDatetime(reservation.scheduled_at)}のご予約のキャンセルを承りました。\n` +
@@ -839,22 +836,22 @@ async function handlePostback(event) {
   }
 
   if (action === 'backToDate') {
-    await updateSession(lineUserId, { temp_date: null, state: 'DATE' });
-    return sendDateCards(event.replyToken);
+    await updateSession(ctx, lineUserId, { temp_date: null, state: 'DATE' });
+    return sendDateCards(ctx, event.replyToken);
   }
 
   // 想定外のpostbackは最初から案内し直す
-  await resetSession(lineUserId);
-  return sendDateCards(event.replyToken);
+  await resetSession(ctx, lineUserId);
+  return sendDateCards(ctx, event.replyToken);
 }
 
 // ---- LINEイベントハンドラ ----
-async function handleEvent(event) {
+async function handleEvent(ctx, event) {
   if (event.type === 'message' && event.message.type === 'text') {
-    return handleTextMessage(event);
+    return handleTextMessage(ctx, event);
   }
   if (event.type === 'postback') {
-    return handlePostback(event);
+    return handlePostback(ctx, event);
   }
   return Promise.resolve(null);
 }
@@ -897,13 +894,48 @@ function formatDatetime(iso) {
 // 注意: express.json() は admin.js 側の router 内だけに限定して適用している。
 // ここでグローバルに app.use(express.json()) すると、/webhook が必要とする
 // 生ボディ（署名検証用）が壊れてしまうため、絶対にここには追加しないこと。
-app.post('/webhook', line.middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(handleEvent))
-    .then(() => res.status(200).end())
-    .catch((err) => {
-      console.error(err);
-      res.status(500).end();
-    });
+//
+// ---- マルチクリニックSaaS化 Phase 3 ----
+// /webhook/:clinicId のように医院ごとのURLで受けられるようにしつつ、
+// :clinicId を省略した従来の /webhook でのアクセスも既存クリニックとして
+// 引き続き動作するようにしている（LINE Developersコンソール側の設定変更が不要）。
+//
+// 署名検証は以前は line.middleware(config) という「起動時に固定されたチャネルシークレット」
+// を使う仕組みに任せていたが、医院ごとにチャネルシークレットが異なるため、
+// リクエストが来るたびに該当医院のチャネルシークレットで検証する方式に変更している。
+// そのため、生ボディを自前で受け取る express.raw() をこのルートにだけ適用し、
+// line.validateSignature() で手動検証している。
+app.post('/webhook/:clinicId?', express.raw({ type: '*/*' }), async (req, res) => {
+  try {
+    const clinicRow = await fetchClinicRow(supabase, req.params.clinicId);
+
+    if (!clinicRow || clinicRow.status === 'suspended') {
+      // 医院が見つからない、または利用停止中。不正リクエスト対策として200で早期終了する
+      console.error(`[webhook] 医院が見つからないか停止中です（path=${req.params.clinicId || '(未指定)'}）`);
+      return res.status(200).end();
+    }
+
+    const ctx = buildClinicContext(clinicRow);
+
+    const signature = req.headers['x-line-signature'];
+    let isValid = false;
+    try {
+      isValid = line.validateSignature(req.body, ctx.channelSecret, signature);
+    } catch (sigErr) {
+      console.error(`[webhook] 署名検証中にエラーが発生しました（clinicId=${ctx.clinicId}）:`, sigErr.message);
+    }
+    if (!isValid) {
+      console.error(`[webhook] 署名検証に失敗しました（clinicId=${ctx.clinicId}）`);
+      return res.status(401).end();
+    }
+
+    const bodyJson = JSON.parse(req.body.toString('utf8'));
+    await Promise.all((bodyJson.events || []).map((event) => handleEvent(ctx, event)));
+    res.status(200).end();
+  } catch (err) {
+    console.error(err);
+    res.status(500).end();
+  }
 });
 
 // ---- 管理画面・問診フォームのJSON API ----
