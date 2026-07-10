@@ -10,6 +10,10 @@
 // 重要：ここで使うsupabaseクライアントはservice_roleキーのもの（index.js側で生成）。
 // service_roleキーはこのファイル＝サーバー側のコードの中だけで使われ、
 // ブラウザ（platform-admin.html）に渡ることは一切ない。
+//
+// 注意：platform_adminsテーブルの実際の列は id / auth_user_id / created_at のみ
+// （roleという列は存在しない）。以前のバージョンで誤って存在しない列を
+// selectしてしまい、権限確認が500エラーになる不具合があったため修正済み。
 
 const express = require('express');
 const nodeCrypto = require('crypto'); // Node標準のcryptoモジュール（webhook_path生成用）
@@ -39,9 +43,10 @@ function requirePlatformAdmin(supabase) {
       return res.status(401).json({ error: 'ログイン情報が無効です。再度ログインしてください' });
     }
 
+    // platform_adminsには id / auth_user_id / created_at しか列が無いため、id だけをselectする
     const { data: adminRow, error: adminError } = await supabase
       .from('platform_admins')
-      .select('id, role')
+      .select('id')
       .eq('auth_user_id', userData.user.id)
       .maybeSingle();
 
