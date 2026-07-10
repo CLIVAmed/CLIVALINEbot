@@ -6,10 +6,11 @@
 // ・全医院の一覧と稼働状況・予約件数の確認
 // ・新規医院の登録（webhook_pathの自動発行、LINEチャネル情報の暗号化保存）
 // ・医院ステータスの変更（trial / active / suspended）
+// ・運営者本人であることの確認（/me、リンク集ページ等の認証チェック用）
 //
 // 重要：ここで使うsupabaseクライアントはservice_roleキーのもの（index.js側で生成）。
 // service_roleキーはこのファイル＝サーバー側のコードの中だけで使われ、
-// ブラウザ（platform-admin.html）に渡ることは一切ない。
+// ブラウザに渡ることは一切ない。
 //
 // 注意：platform_adminsテーブルの実際の列は id / auth_user_id / created_at のみ
 // （roleという列は存在しない）。以前のバージョンで誤って存在しない列を
@@ -72,6 +73,11 @@ function createPlatformAdminRouter(supabase) {
   const router = express.Router();
   router.use(express.json());
   router.use(requirePlatformAdmin(supabase));
+
+  // 運営者本人であることの確認用（リンク集ページなど、データを伴わない認証チェックに使う）
+  router.get('/me', (req, res) => {
+    res.json({ ok: true, email: req.platformAdminUser.email });
+  });
 
   // 医院一覧＋予約件数サマリを取得
   router.get('/clinics', async (req, res) => {

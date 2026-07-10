@@ -19,6 +19,12 @@
 // 新規医院登録（webhook_path自動発行・LINE認証情報の暗号化保存）ができるようにしています。
 // 権限確認は platform_admins テーブルで行い、clinic_admins（各医院のスタッフ）とは
 // 別の権限として扱っています。詳細は platformAdmin.js を参照してください。
+//
+// ---- 運営者専用リンク集（2026-07-10）----
+// /links で、Supabase/Render/GitHub/Netlifyのログインページと、運営者ダッシュボード・
+// 予約管理画面へのリンクをまとめた自分専用ページを追加。Supabase Authでログインし、
+// さらにplatform_adminsに登録された本人であることを /api/platform/me で確認できた場合のみ
+// 中身を表示する（platformAdmin.jsのrequirePlatformAdminミドルウェアを流用）。
 
 require('dotenv').config();
 const path = require('path');
@@ -949,11 +955,11 @@ app.post('/webhook/:clinicId?', express.raw({ type: '*/*' }), async (req, res) =
 // ---- 管理画面・問診フォームのJSON API ----
 app.use('/api', createAdminRouter(supabase));
 
-// ---- 運営者ダッシュボードのJSON API（Phase 5）----
+// ---- 運営者ダッシュボード・リンク集のJSON API（Phase 5）----
 // platform_admins に登録された運営者のみアクセス可能。service_roleキーはサーバー側のみで使用。
 app.use('/api/platform', createPlatformAdminRouter(supabase));
 
-// ---- 管理画面・問診フォーム・運営者ダッシュボードの静的ページ ----
+// ---- 管理画面・問診フォーム・運営者ダッシュボード・リンク集の静的ページ ----
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
@@ -962,6 +968,9 @@ app.get('/questionnaire', (req, res) => {
 });
 app.get('/platform-admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'platform-admin.html'));
+});
+app.get('/operator-links', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'operator-links.html'));
 });
 app.use(express.static(path.join(__dirname, 'public')));
 
