@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CLIVA 管理リンク集</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    background: #F4F7F4;
+    color: #33473C;
+  }
+  .app-hidden { display: none !important; }
+
+  .overlay {
+    position: fixed; inset: 0;
+    background: rgba(20,25,32,0.55);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 50;
+  }
+  .modal {
+    background: #fff; border-radius: 10px; padding: 24px;
+    width: 100%; max-width: 380px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+  }
+  .modal h2 { margin-top: 0; font-size: 16px; }
+  .modal label { display: block; font-size: 13px; margin: 12px 0 4px; color: #4a5b6c; }
+  .modal input {
+    width: 100%; padding: 8px 10px; border: 1px solid #ccd4db; border-radius: 6px; font-size: 14px;
+  }
+  .modal-actions { margin-top: 20px; display: flex; justify-content: flex-end; }
+  .btn { padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 14px; }
+  .btn-primary { background: #3F6B52; color: #fff; }
+  #loginError { color: #d0483b; font-size: 13px; min-height: 18px; margin-top: 8px; }
+
+  header {
+    display: flex; justify-content: space-between; align-items: center;
+    max-width: 640px; margin: 0 auto; padding: 24px 24px 0;
+  }
+  header button {
+    background: transparent; border: 1px solid #A9C4B2; color: #33473C;
+    padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  main { padding: 20px 24px 40px; }
+  h1 { text-align: center; color: #3F6B52; font-size: 22px; margin: 8px 0 4px; }
+  p.sub { text-align: center; color: #6B7C71; font-size: 13px; margin-top: 0; margin-bottom: 28px; }
+
+  .group { max-width: 640px; margin: 0 auto 24px; }
+  .group h2 {
+    font-size: 13px; color: #6B7C71; border-bottom: 1px solid #A9C4B2;
+    padding-bottom: 6px; margin-bottom: 12px;
+  }
+  a.card {
+    display: flex; justify-content: space-between; align-items: center;
+    background: #FFFFFF; border: 1px solid #A9C4B2; border-radius: 10px;
+    padding: 14px 18px; margin-bottom: 10px; text-decoration: none;
+    color: #33473C; transition: box-shadow .15s;
+  }
+  a.card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); border-color: #3F6B52; }
+  .card .name { font-size: 15px; font-weight: 600; }
+  .card .desc { font-size: 12px; color: #6B7C71; margin-top: 2px; }
+  .card .arrow { color: #3F6B52; font-size: 18px; }
+</style>
+</head>
+<body>
+
+<div id="loginOverlay" class="overlay">
+  <div class="modal">
+    <h2>CLIVA 管理リンク集</h2>
+    <p style="font-size:13px;color:#647585;">運営者アカウントでログインしてください</p>
+    <label>メールアドレス</label>
+    <input id="loginEmail" type="email" autocomplete="username">
+    <label>パスワード</label>
+    <input id="loginPassword" type="password" autocomplete="current-password">
+    <div id="loginError"></div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="loginBtn">ログイン</button>
+    </div>
+  </div>
+</div>
+
+<header id="appHeader" class="app-hidden">
+  <span></span>
+  <button id="logoutBtn">ログアウト</button>
+</header>
+
+<main id="app" class="app-hidden">
+  <h1>CLIVA 管理リンク集</h1>
+  <p class="sub">クリックすると新しいタブでそれぞれのページを開きます</p>
+
+  <div class="group">
+    <h2>各サービスのログイン</h2>
+    <a class="card" href="https://supabase.com/dashboard/project/fxvbbcnrbrkzaxjlmoxe" target="_blank">
+      <div><div class="name">Supabase（CLIVAプロジェクト）</div><div class="desc">データベース・認証ユーザー管理</div></div>
+      <div class="arrow">→</div>
+    </a>
+    <a class="card" href="https://dashboard.render.com/" target="_blank">
+      <div><div class="name">Render</div><div class="desc">サーバーのデプロイ状況・ログ確認</div></div>
+      <div class="arrow">→</div>
+    </a>
+    <a class="card" href="https://github.com/CLIVAmed/CLIVALINEbot" target="_blank">
+      <div><div class="name">GitHub（CLIVALINEbotリポジトリ）</div><div class="desc">コードの編集・アップロード</div></div>
+      <div class="arrow">→</div>
+    </a>
+    <a class="card" href="https://app.netlify.com/" target="_blank">
+      <div><div class="name">Netlify</div><div class="desc">LP（ランディングページ）の管理</div></div>
+      <div class="arrow">→</div>
+    </a>
+  </div>
+
+  <div class="group">
+    <h2>予約システムの画面</h2>
+    <a class="card" href="https://clivalinebot.onrender.com/platform-admin" target="_blank">
+      <div><div class="name">運営者ダッシュボード</div><div class="desc">全医院の一覧・新規医院登録</div></div>
+      <div class="arrow">→</div>
+    </a>
+    <a class="card" href="https://clivalinebot.onrender.com/admin" target="_blank">
+      <div><div class="name">CLIVA（自分のクリニック）予約管理画面</div><div class="desc">医院スタッフ用の予約一覧・操作画面</div></div>
+      <div class="arrow">→</div>
+    </a>
+  </div>
+</main>
+
+<script>
+const SUPABASE_URL = 'https://fxvbbcnrbrkzaxjlmoxe.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_SElqbRBcCrX8f9mfcQOxZA_gPDHtqbS';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+function showApp() {
+  document.getElementById('loginOverlay').classList.add('app-hidden');
+  document.getElementById('app').classList.remove('app-hidden');
+  document.getElementById('appHeader').classList.remove('app-hidden');
+}
+function showLogin(message) {
+  document.getElementById('loginOverlay').classList.remove('app-hidden');
+  document.getElementById('app').classList.add('app-hidden');
+  document.getElementById('appHeader').classList.add('app-hidden');
+  document.getElementById('loginError').textContent = message || '';
+}
+
+// ここが「自分しかログインできない」の実体：
+// ログインできただけでは画面を表示せず、サーバー側の /api/platform/me を呼び、
+// platform_adminsテーブルに登録されている本人であることまで確認してから表示する。
+async function verifyAndShow() {
+  const { data: sessionData } = await sb.auth.getSession();
+  const token = sessionData && sessionData.session ? sessionData.session.access_token : null;
+  if (!token) {
+    showLogin();
+    return;
+  }
+  try {
+    const res = await fetch('/api/platform/me', {
+      headers: { Authorization: 'Bearer ' + token },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      await sb.auth.signOut();
+      showLogin(body.error || 'このアカウントには閲覧権限がありません');
+      return;
+    }
+    showApp();
+  } catch (e) {
+    showLogin('確認中にエラーが発生しました。もう一度お試しください');
+  }
+}
+
+document.getElementById('loginBtn').addEventListener('click', async () => {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  document.getElementById('loginError').textContent = '';
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) {
+    document.getElementById('loginError').textContent = 'ログインに失敗しました：' + error.message;
+    return;
+  }
+  await verifyAndShow();
+});
+
+document.getElementById('logoutBtn').addEventListener('click', async () => {
+  await sb.auth.signOut();
+  showLogin();
+});
+
+verifyAndShow();
+</script>
+</body>
+</html>
