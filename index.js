@@ -21,8 +21,8 @@
 // 別の権限として扱っています。詳細は platformAdmin.js を参照してください。
 //
 // ---- 運営者専用リンク集（2026-07-10）----
-// /links で、Supabase/Render/GitHub/Netlifyのログインページと、運営者ダッシュボード・
-// 予約管理画面へのリンクをまとめた自分専用ページを追加。Supabase Authでログインし、
+// /operator-links で、Supabase/Render/GitHub/Netlifyのログインページと、運営者ダッシュボード・
+// 予約管理画面・各種資料へのリンクをまとめた自分専用ページを追加。Supabase Authでログインし、
 // さらにplatform_adminsに登録された本人であることを /api/platform/me で確認できた場合のみ
 // 中身を表示する（platformAdmin.jsのrequirePlatformAdminミドルウェアを流用）。
 
@@ -972,6 +972,7 @@ app.get('/platform-admin', (req, res) => {
 app.get('/operator-links', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'operator-links.html'));
 });
+// public/docs 以下のPDF等の静的資料も、下のexpress.static(public)でまとめて配信される
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => {
