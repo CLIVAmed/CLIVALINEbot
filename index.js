@@ -11,7 +11,14 @@
 // リクエスト（Webhook呼び出し）ごとに「どの医院宛てか」を解決し、その医院用の情報をまとめた
 // ctx オブジェクト（clinicContext.js参照）を各処理関数に引き回す構成に変更しています。
 // 変更点の詳細は CLIVA_SAAS化_実装ロードマップ.md の Phase 3、
-// および CLIVA_SaaS化_Phase3_診療枠コード変更案.md を参照してください。
+// および CLIVA_SaaS_Phase3_deploy_guide.md を参照してください。
+// 2026-07-10 本番デプロイ・LINE上での動作確認済み。
+//
+// ---- マルチクリニックSaaS化 Phase 5（2026-07-10）----
+// 運営者（あなた）用ダッシュボードを追加。/platform-admin で全医院の一覧・稼働状況の確認、
+// 新規医院登録（webhook_path自動発行・LINE認証情報の暗号化保存）ができるようにしています。
+// 権限確認は platform_admins テーブルで行い、clinic_admins（各医院のスタッフ）とは
+// 別の権限として扱っています。詳細は platformAdmin.js を参照してください。
 
 require('dotenv').config();
 const path = require('path');
@@ -21,6 +28,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { createCalendarEvent, updateCalendarEvent, markCalendarEventCancelled } = require('./googleCalendar');
 const { createAdminRouter } = require('./admin');
 const { fetchClinicRow, buildClinicContext } = require('./clinicContext');
+const { createPlatformAdminRouter } = require('./platformAdmin');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -891,7 +899,7 @@ function formatDatetime(iso) {
 }
 
 // ---- ルーティング ----
-// 注意: express.json() は admin.js 側の router 内だけに限定して適用している。
+// 注意: express.json() は admin.js / platformAdmin.js 側の router 内だけに限定して適用している。
 // ここでグローバルに app.use(express.json()) すると、/webhook が必要とする
 // 生ボディ（署名検証用）が壊れてしまうため、絶対にここには追加しないこと。
 //
@@ -941,12 +949,19 @@ app.post('/webhook/:clinicId?', express.raw({ type: '*/*' }), async (req, res) =
 // ---- 管理画面・問診フォームのJSON API ----
 app.use('/api', createAdminRouter(supabase));
 
-// ---- 管理画面・問診フォームの静的ページ ----
+// ---- 運営者ダッシュボードのJSON API（Phase 5）----
+// platform_admins に登録された運営者のみアクセス可能。service_roleキーはサーバー側のみで使用。
+app.use('/api/platform', createPlatformAdminRouter(supabase));
+
+// ---- 管理画面・問診フォーム・運営者ダッシュボードの静的ページ ----
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 app.get('/questionnaire', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'questionnaire.html'));
+});
+app.get('/platform-admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'platform-admin.html'));
 });
 app.use(express.static(path.join(__dirname, 'public')));
 
