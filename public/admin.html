@@ -6,6 +6,7 @@
 <title>Cliva®︎予約管理システム</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{
     --page-bg:#F4F7F4;
@@ -52,6 +53,7 @@
     margin:0 auto;
     padding:20px 16px 80px;
   }
+  main.app-hidden{ display:none; }
   .tabs{
     display:flex;
     gap:8px;
@@ -230,9 +232,10 @@
 
 <header>
   <h1>Cliva<span>®︎</span>予約管理システム</h1>
+  <button class="btn btn-outline" id="logoutBtn" style="font-size:13px;padding:8px 14px;">ログアウト</button>
 </header>
 
-<main>
+<main class="app-hidden">
   <div class="tabs">
     <button class="tab-btn active" data-tab="list">予約一覧</button>
     <button class="tab-btn" data-tab="cancelled">キャンセル済み</button>
@@ -251,7 +254,25 @@
   <div class="list" id="listContainer"></div>
 </main>
 
-<!-- 詳細モーダル -->
+<div class="overlay open" id="loginOverlay">
+  <div class="modal">
+    <h2>ログイン</h2>
+    <p style="color:var(--sub);font-size:13px;margin-top:0;">医院管理者アカウントでログインしてください</p>
+    <div class="field">
+      <label>メールアドレス</label>
+      <input id="loginEmail" type="email" placeholder="you@example.com" autocomplete="username" />
+    </div>
+    <div class="field">
+      <label>パスワード</label>
+      <input id="loginPassword" type="password" placeholder="••••••••" autocomplete="current-password" />
+    </div>
+    <div class="error-text" id="loginError"></div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="loginBtn" style="flex:1;">ログイン</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="detailOverlay">
   <div class="modal">
     <div class="close-row"><button onclick="closeDetail()">閉じる ✕</button></div>
@@ -261,7 +282,6 @@
   </div>
 </div>
 
-<!-- 新規予約モーダル -->
 <div class="overlay" id="newOverlay">
   <div class="modal">
     <div class="close-row"><button onclick="closeNew()">閉じる ✕</button></div>
@@ -301,9 +321,78 @@
 </div>
 
 <script>
+const SUPABASE_URL = 'https://fxvbbcnrbrkzaxjlmoxe.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_SElqbRBcCrX8f9mfcQOxZA_gPDHtqbS';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const mainEl = document.querySelector('main');
+
+function showApp(){
+  document.getElementById('loginOverlay').classList.remove('open');
+  mainEl.classList.remove('app-hidden');
+  loadList();
+}
+
+function showLogin(message){
+  mainEl.classList.add('app-hidden');
+  document.getElementById('loginOverlay').classList.add('open');
+  const errorEl = document.getElementById('loginError');
+  if(message){
+    errorEl.textContent = message;
+    errorEl.style.display = 'block';
+  } else {
+    errorEl.style.display = 'none';
+  }
+}
+
+async function apiFetch(url, options = {}){
+  const { data: { session } } = await sb.auth.getSession();
+  const headers = Object.assign({}, options.headers || {});
+  if(session){
+    headers['Authorization'] = `Bearer ${session.access_token}`;
+  }
+  const res = await fetch(url, Object.assign({}, options, { headers }));
+  if(res.status === 401 || res.status === 403){
+    await sb.auth.signOut();
+    showLogin('ログインの有効期限が切れました。再度ログインしてください。');
+    throw new Error('unauthorized');
+  }
+  return res;
+}
+
+document.getElementById('loginBtn').addEventListener('click', async () => {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const errorEl = document.getElementById('loginError');
+  errorEl.style.display = 'none';
+  if(!email || !password){
+    errorEl.textContent = 'メールアドレスとパスワードを入力してください';
+    errorEl.style.display = 'block';
+    return;
+  }
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if(error){
+    errorEl.textContent = 'ログインに失敗しました。メールアドレスまたはパスワードをご確認ください。';
+    errorEl.style.display = 'block';
+    return;
+  }
+  showApp();
+});
+
+document.getElementById('loginPassword').addEventListener('keydown', (e) => {
+  if(e.key === 'Enter'){
+    document.getElementById('loginBtn').click();
+  }
+});
+
+document.getElementById('logoutBtn').addEventListener('click', async () => {
+  await sb.auth.signOut();
+  showLogin();
+});
+
 let currentTab = 'list';
 let currentList = [];
-let selectedDay = 'all'; // 予約一覧タブでの日付フィルタ。'all' は全日程表示
+let selectedDay = 'all';
 
 const SOURCE_LABEL = { line:'LINE', phone:'電話', walk_in:'直接来院', staff:'受付入力' };
 const STATUS_LABEL = { reserved:'予約済み', cancelled:'キャンセル済み', visited:'来院済み' };
@@ -316,14 +405,12 @@ function fmtDatetime(iso){
   }).format(d);
 }
 
-// JSTでの日付キー（例: '2026-07-08'）を作る。同じ日付でまとめるための基準。
 function dayKey(iso){
   const d = new Date(iso);
-  return new Intl.DateTimeFormat('sv-SE', { timeZone:'Asia/Tokyo' }).format(d); // 'YYYY-MM-DD' 形式
+  return new Intl.DateTimeFormat('sv-SE', { timeZone:'Asia/Tokyo' }).format(d);
 }
 
 function dayLabel(key){
-  // key（'YYYY-MM-DD'）をローカルの日付として扱い、月/日(曜)の形式にする
   const d = new Date(`${key}T00:00:00+09:00`);
   return new Intl.DateTimeFormat('ja-JP', { timeZone:'Asia/Tokyo', month:'numeric', day:'numeric', weekday:'short' }).format(d);
 }
@@ -335,7 +422,7 @@ async function loadList(opts = {}){
     container.innerHTML = '<div class="empty">読み込み中…</div>';
   }
   try{
-    const res = await fetch(`/api/reservations?view=${currentTab}`);
+    const res = await apiFetch(`/api/reservations?view=${currentTab}`);
     const data = await res.json();
     currentList = (data.reservations || []).slice().sort((a,b) => new Date(a.scheduled_at) - new Date(b.scheduled_at));
     renderDayTabs();
@@ -350,33 +437,24 @@ async function loadList(opts = {}){
 
 function renderDayTabs(){
   const wrap = document.getElementById('dayTabs');
-
-  // 未来院一覧タブでは日付タブは表示しない（経過時間順の一覧のまま）
   if(currentTab !== 'list'){
     wrap.innerHTML = '';
     return;
   }
-
   if(currentList.length === 0){
     wrap.innerHTML = '';
     return;
   }
-
-  // 出現する日付ごとに件数を集計（昇順）
   const counts = {};
   currentList.forEach(r => {
     const k = dayKey(r.scheduled_at);
     counts[k] = (counts[k] || 0) + 1;
   });
   const days = Object.keys(counts).sort();
-
-  // 選択中の日付がもう存在しない場合は「すべて」に戻す
   if(selectedDay !== 'all' && !days.includes(selectedDay)){
     selectedDay = 'all';
   }
-
   const todayKey = new Intl.DateTimeFormat('sv-SE', { timeZone:'Asia/Tokyo' }).format(new Date());
-
   let html = `<button class="day-tab ${selectedDay==='all' ? 'active' : ''}" onclick="selectDay('all')">すべて <span class="n">${currentList.length}</span></button>`;
   days.forEach(k => {
     const isToday = k === todayKey;
@@ -393,24 +471,18 @@ function selectDay(key){
 
 function renderList(){
   const container = document.getElementById('listContainer');
-
   const visibleList = (currentTab === 'list' && selectedDay !== 'all')
     ? currentList.filter(r => dayKey(r.scheduled_at) === selectedDay)
     : currentList;
-
   document.getElementById('countLabel').textContent = `${visibleList.length}件`;
-
   if(visibleList.length === 0){
     container.innerHTML = `<div class="empty">${currentTab==='cancelled' ? 'キャンセル済みの予約はありません' : 'この日の予約はありません'}</div>`;
     return;
   }
-
   container.innerHTML = '';
   visibleList.forEach(r => {
     const card = document.createElement('div');
     card.className = 'card';
-
-    // display_state: reserved(予約済み) / overdue(未来院) / visited(来院済み) / cancelled(キャンセル済み)
     const state = r.display_state || r.status;
     const stateInfo = {
       reserved:  { label:'予約済み',   cls:'badge-reserved'  },
@@ -418,19 +490,13 @@ function renderList(){
       visited:   { label:'来院済み',   cls:'badge-visited'   },
       cancelled: { label:'キャンセル済み', cls:'badge-cancelled' },
     }[state] || { label: state, cls:'badge-outline' };
-
     const statusBadge = `<span class="badge ${stateInfo.cls}">${stateInfo.label}</span>`;
     const overdueTimeBadge = (state === 'overdue' && r.overdue_label)
       ? `<span class="badge badge-overdue">${r.overdue_label}</span>` : '';
-
     const qBadge = r.questionnaire_submitted
       ? `<span class="badge badge-outline">問診 入力済み</span>`
       : `<span class="badge badge-outline">問診 未入力</span>`;
-
-    // ステータス変更操作は、予約経路(LINE/電話/直接来院/受付入力)に関わらず、
-    // status === 'reserved'（未来院を含む）の間はどの予約にも表示する
     const canChangeStatus = r.status === 'reserved';
-
     card.innerHTML = `
       <div class="card-main" onclick="openDetail(${r.id})">
         <div class="card-row1">
@@ -462,7 +528,7 @@ async function updateStatus(id, status){
   const label = status === 'visited' ? '来院済み' : 'キャンセル済み';
   if(!confirm(`この予約を「${label}」にしますか？`)) return;
   try{
-    const res = await fetch(`/api/reservations/${id}/status`, {
+    const res = await apiFetch(`/api/reservations/${id}/status`, {
       method:'PATCH',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ status })
@@ -487,9 +553,9 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 document.getElementById('refreshBtn').addEventListener('click', loadList);
 
-// LINE側での予約・キャンセル・変更は管理画面を開いたまま反映されないため、
-// 開いている間は定期的に一覧を自動更新する（モーダルを開いている間は上書きしないよう避ける）
-setInterval(() => {
+setInterval(async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  if(!session) return;
   const detailOpen = document.getElementById('detailOverlay').classList.contains('open');
   const newOpen = document.getElementById('newOverlay').classList.contains('open');
   if (!detailOpen && !newOpen) {
@@ -497,7 +563,6 @@ setInterval(() => {
   }
 }, 15000);
 
-// ---- 詳細モーダル ----
 async function openDetail(id){
   const overlay = document.getElementById('detailOverlay');
   const body = document.getElementById('detailBody');
@@ -505,12 +570,10 @@ async function openDetail(id){
   body.innerHTML = '読み込み中…';
   actions.innerHTML = '';
   overlay.classList.add('open');
-
   try{
-    const res = await fetch(`/api/reservations/${id}`);
+    const res = await apiFetch(`/api/reservations/${id}`);
     const data = await res.json();
     const r = data.reservation;
-
     const q = r.questionnaire;
     const isOverdue = r.status === 'reserved' && new Date(r.scheduled_at).getTime() < Date.now();
     const stateLabel = isOverdue ? '未来院' : (STATUS_LABEL[r.status] || r.status);
@@ -522,9 +585,7 @@ async function openDetail(id){
       ['予約経路', SOURCE_LABEL[r.source] || r.source || '-'],
       ['問診入力状況', r.questionnaire_submitted ? '入力済み' : '未入力'],
     ];
-
     let html = rows.map(([k,v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
-
     if(q){
       html += `<div class="section-title">問診内容</div>`;
       const qrows = [
@@ -538,9 +599,7 @@ async function openDetail(id){
       ];
       html += qrows.map(([k,v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${escapeHtml(String(v))}</span></div>`).join('');
     }
-
     body.innerHTML = html;
-
     let actionsHtml = '';
     if(r.status === 'reserved'){
       actionsHtml += `<button class="btn btn-primary" onclick="updateStatus(${r.id},'visited')">来院済みにする</button>`;
@@ -553,7 +612,6 @@ async function openDetail(id){
 }
 function closeDetail(){ document.getElementById('detailOverlay').classList.remove('open'); }
 
-// ---- 新規予約モーダル ----
 function openNew(){
   document.getElementById('newName').value = '';
   document.getElementById('newPhone').value = '';
@@ -573,18 +631,14 @@ document.getElementById('submitNewBtn').addEventListener('click', async () => {
   const symptom = document.getElementById('newSymptom').value.trim();
   const source = document.getElementById('newSource').value;
   const errorEl = document.getElementById('newError');
-
   if(!name || !phone || !datetimeLocal){
     errorEl.textContent = '氏名・電話番号・予約日時は必須です';
     errorEl.style.display = 'block';
     return;
   }
-
-  // datetime-local はJSTのローカル時刻として入力されるため、そのままISO(+09:00)として送る
   const scheduledAt = `${datetimeLocal}:00+09:00`;
-
   try{
-    const res = await fetch('/api/reservations', {
+    const res = await apiFetch('/api/reservations', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ name, phone, scheduled_at: scheduledAt, symptom, source })
@@ -603,7 +657,14 @@ document.getElementById('submitNewBtn').addEventListener('click', async () => {
   }
 });
 
-loadList();
+(async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  if(session){
+    showApp();
+  } else {
+    showLogin();
+  }
+})();
 </script>
 </body>
 </html>
