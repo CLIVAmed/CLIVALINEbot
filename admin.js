@@ -1,18 +1,62 @@
 // admin.js
 // ------------------------------------------------------------------
 // 管理画面（/admin）と問診フォーム（/questionnaire）向けのJSON APIルーター。
-// 既存のLINE予約フロー（index.js）には一切手を入れず、独立したモジュールとして
-// 追加する。将来ログイン認証を追加する際は、この router に auth ミドルウェアを
-// 差し込むだけで済むようにしてある。
+//
+// ---- マルチクリニックSaaS化 Phase 4（2026-07-10）----
+// 医院管理者ログイン（Supabase Auth）を追加し、/reservations 系のエンドポイントは
+// ログインした医院管理者のみアクセスできるようにした。ログインユーザーの
+// auth_user_id を clinic_admins テーブルで引いて clinic_id を特定し、
+// 以降のクエリはすべてその clinic_id で絞り込む（他医院のデータは一切見えない）。
+//
+// 問診フォーム系のエンドポイント（/questionnaire/:reservationId）は、患者本人が
+// LINEから届いたリンクでログインなしにアクセスするものなので、認証対象からは
+// 意図的に外している（これは既知の別課題として PROJECT_OVERVIEW.md に記録済み）。
 // ------------------------------------------------------------------
 
 const express = require('express');
+
+// ログインした医院管理者かどうかを確認し、req.clinicId / req.adminUser を設定するミドルウェア。
+// /reservations 系のルートにのみ適用する（/questionnaire には適用しない）。
+function requireClinicAdmin(supabase) {
+  return async (req, res, next) => {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+    if (!token) {
+      return res.status(401).json({ error: 'ログインが必要です' });
+    }
+
+    const { data: userData, error: userError } = await supabase.auth.getUser(token);
+    if (userError || !userData || !userData.user) {
+      return res.status(401).json({ error: 'ログイン情報が無効です。再度ログインしてください' });
+    }
+
+    const { data: adminRow, error: adminError } = await supabase
+      .from('clinic_admins')
+      .select('clinic_id, role')
+      .eq('auth_user_id', userData.user.id)
+      .maybeSingle();
+
+    if (adminError) {
+      console.error('[admin] clinic_admins取得に失敗しました:', adminError.message);
+      return res.status(500).json({ error: '権限確認に失敗しました' });
+    }
+    if (!adminRow) {
+      return res.status(403).json({ error: 'このアカウントには医院の管理権限がありません' });
+    }
+
+    req.clinicId = adminRow.clinic_id;
+    req.adminUser = userData.user;
+    next();
+  };
+}
 
 function createAdminRouter(supabase) {
   const router = express.Router();
   router.use(express.json());
 
-  // 予約1件を、一覧・詳細で使いやすい形に整形する
+  const requireAuth = requireClinicAdmin(supabase);
+
   function shapeReservation(row) {
     const patient = row.patients || {};
     const questionnaire = Array.isArray(row.medical_questionnaires)
@@ -38,14 +82,10 @@ function createAdminRouter(supabase) {
   const SELECT_WITH_JOINS =
     '*, patients(name, phone), medical_questionnaires(id, birth_date, gender, consult_content, symptom_since, current_medication, allergies, medical_history, updated_at)';
 
-  // ---- GET /api/reservations?view=list|cancelled ----
-  // view=list      : status = reserved / visited （予約一覧タブ。キャンセル済みは含まない）
-  //                  reserved のうち予約時刻を過ぎているものには display_state='overdue' を付与する
-  // view=cancelled : status = cancelled （キャンセル済みタブ）
-  router.get('/reservations', async (req, res) => {
+  router.get('/reservations', requireAuth, async (req, res) => {
     const view = req.query.view === 'cancelled' ? 'cancelled' : 'list';
 
-    let query = supabase.from('reservations').select(SELECT_WITH_JOINS);
+    let query = supabase.from('reservations').select(SELECT_WITH_JOINS).eq('clinic_id', req.clinicId);
 
     if (view === 'cancelled') {
       query = query.eq('status', 'cancelled').order('scheduled_at', { ascending: false });
@@ -66,7 +106,7 @@ function createAdminRouter(supabase) {
       shaped.forEach((r) => {
         if (r.status === 'reserved' && new Date(r.scheduled_at).getTime() < nowMs) {
           const diffMin = Math.max(0, Math.floor((nowMs - new Date(r.scheduled_at).getTime()) / 60000));
-          r.display_state = 'overdue'; // 未来院（予約時刻を過ぎているが来院済みになっていない）
+          r.display_state = 'overdue';
           r.overdue_minutes = diffMin;
           r.overdue_label =
             diffMin < 60 ? `${diffMin}分経過` : `${Math.floor(diffMin / 60)}時間${diffMin % 60}分経過`;
@@ -85,12 +125,12 @@ function createAdminRouter(supabase) {
     res.json({ reservations: shaped });
   });
 
-  // ---- GET /api/reservations/:id ----
-  router.get('/reservations/:id', async (req, res) => {
+  router.get('/reservations/:id', requireAuth, async (req, res) => {
     const { data, error } = await supabase
       .from('reservations')
       .select(SELECT_WITH_JOINS)
       .eq('id', req.params.id)
+      .eq('clinic_id', req.clinicId)
       .maybeSingle();
 
     if (error) {
@@ -102,8 +142,7 @@ function createAdminRouter(supabase) {
     res.json({ reservation: shapeReservation(data) });
   });
 
-  // ---- POST /api/reservations （新規予約追加：電話・直接来院・受付入力） ----
-  router.post('/reservations', async (req, res) => {
+  router.post('/reservations', requireAuth, async (req, res) => {
     const { name, phone, scheduled_at, symptom, source } = req.body || {};
 
     if (!name || !phone || !scheduled_at) {
@@ -115,10 +154,10 @@ function createAdminRouter(supabase) {
     }
 
     try {
-      // 電話番号で既存の（LINE未経由の）患者を探し、いなければ新規作成する
       let { data: patient } = await supabase
         .from('patients')
         .select('*')
+        .eq('clinic_id', req.clinicId)
         .eq('phone', phone)
         .is('line_user_id', null)
         .maybeSingle();
@@ -126,7 +165,7 @@ function createAdminRouter(supabase) {
       if (!patient) {
         const { data: created, error: createErr } = await supabase
           .from('patients')
-          .insert({ name, phone, line_user_id: null })
+          .insert({ clinic_id: req.clinicId, name, phone, line_user_id: null })
           .select()
           .single();
         if (createErr) throw createErr;
@@ -142,11 +181,11 @@ function createAdminRouter(supabase) {
       const { data: reservation, error: insertErr } = await supabase
         .from('reservations')
         .insert({
+          clinic_id: req.clinicId,
           patient_id: patient.id,
           department: null,
           scheduled_at,
           symptom: symptom || null,
-          // 直接来院は登録した時点ですでに患者が来院しているため、自動で「来院済み」にする
           status: source === 'walk_in' ? 'visited' : 'reserved',
           source,
           reservation_no: finalReservationNo,
@@ -164,8 +203,7 @@ function createAdminRouter(supabase) {
     }
   });
 
-  // ---- PATCH /api/reservations/:id/status （来院済み・キャンセル済みに更新） ----
-  router.patch('/reservations/:id/status', async (req, res) => {
+  router.patch('/reservations/:id/status', requireAuth, async (req, res) => {
     const { status } = req.body || {};
     if (!['visited', 'cancelled', 'reserved'].includes(status)) {
       return res.status(400).json({ error: '不正なステータスです' });
@@ -175,6 +213,7 @@ function createAdminRouter(supabase) {
       .from('reservations')
       .update({ status, updated_at: new Date().toISOString() })
       .eq('id', req.params.id)
+      .eq('clinic_id', req.clinicId)
       .select(SELECT_WITH_JOINS)
       .maybeSingle();
 
@@ -187,7 +226,6 @@ function createAdminRouter(supabase) {
     res.json({ reservation: shapeReservation(data) });
   });
 
-  // ---- GET /api/questionnaire/:reservationId （問診フォーム表示用） ----
   router.get('/questionnaire/:reservationId', async (req, res) => {
     const { data: reservation, error } = await supabase
       .from('reservations')
@@ -215,7 +253,6 @@ function createAdminRouter(supabase) {
     });
   });
 
-  // ---- POST /api/questionnaire/:reservationId （問診フォーム送信・upsert） ----
   router.post('/questionnaire/:reservationId', async (req, res) => {
     const reservationId = req.params.reservationId;
     const {
@@ -232,7 +269,6 @@ function createAdminRouter(supabase) {
       return res.status(400).json({ error: '本日相談したい内容と症状の時期は必須です' });
     }
 
-    // 予約の存在確認
     const { data: reservation } = await supabase
       .from('reservations')
       .select('id')
